@@ -1,0 +1,12 @@
+Create a financial portfolio optimization tool with the following requirements:
+- library is written in c++
+- can be imported into python code
+- command line front end written in c++ for Linux and windows
+- supports standard MVO and Black-Litterman 
+- fully documented code and user documentation
+- provide a comprehensive test suite
+- support writing output to console, json and csv formats
+- support reading parameters from json and toml formats
+- support reading inputs from json and csv formats
+- include detailed logging support
+- provide a command line tool to produce graphical diagnostic output using a jupyter notebook template 

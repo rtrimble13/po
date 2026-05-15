@@ -347,8 +347,8 @@ OptimizationResult MVOptimizer::optimizeForTargetVolatility(const MarketData& da
     if (target_volatility <= 0.0)
         throw std::invalid_argument("target_volatility must be > 0");
 
-    // Volatility is monotone non-increasing in λ (higher λ ⇒ lower vol).
-    // Binary search in log-λ.
+    // Binary search in log-λ. Depending on constraints, realised volatility
+    // can increase or decrease with λ, so infer direction from endpoints.
     const double lo_lam = std::max(params_.min_risk_aversion, 1e-4);
     const double hi_lam = std::max(params_.max_risk_aversion, lo_lam * 1e4);
 
@@ -359,18 +359,24 @@ OptimizationResult MVOptimizer::optimizeForTargetVolatility(const MarketData& da
     const double v_lo = vol_at(lo_lam);
     const double v_hi = vol_at(hi_lam);
 
-    if (target_volatility >= v_lo) {
-        auto r = optimizeFor(data, lo_lam);
+    const bool vol_increases_with_lambda = (v_hi >= v_lo);
+    const double v_min = vol_increases_with_lambda ? v_lo : v_hi;
+    const double v_max = vol_increases_with_lambda ? v_hi : v_lo;
+    const double lam_at_v_min = vol_increases_with_lambda ? lo_lam : hi_lam;
+    const double lam_at_v_max = vol_increases_with_lambda ? hi_lam : lo_lam;
+
+    if (target_volatility >= v_max) {
+        auto r = optimizeFor(data, lam_at_v_max);
         r.status_message =
             "Target volatility (" + std::to_string(target_volatility) +
-            ") exceeds max achievable; returning λ_min portfolio";
+            ") exceeds max achievable; returning boundary portfolio";
         return r;
     }
-    if (target_volatility <= v_hi) {
-        auto r = optimizeFor(data, hi_lam);
+    if (target_volatility <= v_min) {
+        auto r = optimizeFor(data, lam_at_v_min);
         r.status_message =
             "Target volatility (" + std::to_string(target_volatility) +
-            ") below min achievable; returning λ_max portfolio";
+            ") below min achievable; returning boundary portfolio";
         return r;
     }
 
@@ -383,8 +389,10 @@ OptimizationResult MVOptimizer::optimizeForTargetVolatility(const MarketData& da
             r.status_message = "Target-volatility portfolio";
             return r;
         }
-        if (v_mid > target_volatility) log_lo = log_mid; // need more risk-aversion
-        else                            log_hi = log_mid;
+        if ((v_mid < target_volatility) == vol_increases_with_lambda)
+            log_lo = log_mid; // increase λ
+        else
+            log_hi = log_mid; // decrease λ
     }
     auto r = optimizeFor(data, std::exp(0.5 * (log_lo + log_hi)));
     r.status_message = "Target-volatility portfolio (approximate)";
@@ -401,23 +409,29 @@ OptimizationResult MVOptimizer::optimizeForTargetReturn(const MarketData& data,
         return optimizeFor(data, lam).metrics.expected_return;
     };
 
-    // Return is monotone non-decreasing in λ⁻¹ (higher λ ⇒ lower return typically).
-    // Search in log-λ.
-    const double r_lo = ret_at(lo_lam); // high return
-    const double r_hi = ret_at(hi_lam); // low return
+    // Search in log-λ. Depending on constraints, realised return can increase
+    // or decrease with λ, so infer direction from endpoints.
+    const double r_lo = ret_at(lo_lam);
+    const double r_hi = ret_at(hi_lam);
 
-    if (target_return >= r_lo) {
-        auto r = optimizeFor(data, lo_lam);
+    const bool ret_increases_with_lambda = (r_hi >= r_lo);
+    const double r_min = ret_increases_with_lambda ? r_lo : r_hi;
+    const double r_max = ret_increases_with_lambda ? r_hi : r_lo;
+    const double lam_at_r_min = ret_increases_with_lambda ? lo_lam : hi_lam;
+    const double lam_at_r_max = ret_increases_with_lambda ? hi_lam : lo_lam;
+
+    if (target_return >= r_max) {
+        auto r = optimizeFor(data, lam_at_r_max);
         r.status_message =
             "Target return (" + std::to_string(target_return) +
-            ") exceeds max achievable; returning λ_min portfolio";
+            ") exceeds max achievable; returning boundary portfolio";
         return r;
     }
-    if (target_return <= r_hi) {
-        auto r = optimizeFor(data, hi_lam);
+    if (target_return <= r_min) {
+        auto r = optimizeFor(data, lam_at_r_min);
         r.status_message =
             "Target return (" + std::to_string(target_return) +
-            ") below min achievable; returning λ_max portfolio";
+            ") below min achievable; returning boundary portfolio";
         return r;
     }
 
@@ -430,8 +444,10 @@ OptimizationResult MVOptimizer::optimizeForTargetReturn(const MarketData& data,
             r.status_message = "Target-return portfolio";
             return r;
         }
-        if (r_mid < target_return) log_hi = log_mid; // decrease λ for higher return
-        else                        log_lo = log_mid;
+        if ((r_mid < target_return) == ret_increases_with_lambda)
+            log_lo = log_mid; // increase λ
+        else
+            log_hi = log_mid; // decrease λ
     }
     auto r = optimizeFor(data, std::exp(0.5 * (log_lo + log_hi)));
     r.status_message = "Target-return portfolio (approximate)";

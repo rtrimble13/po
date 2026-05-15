@@ -65,7 +65,8 @@ public:
     /// Minimum-variance portfolio (λ → 0).
     OptimizationResult minVariancePortfolio(const MarketData& data);
 
-    /// Maximum-Sharpe (tangency) portfolio. Found by binary search over λ.
+    /// Maximum-Sharpe (tangency) portfolio. Found by a coarse logarithmic
+    /// sweep over λ followed by golden-section refinement.
     OptimizationResult maxSharpePortfolio(const MarketData& data);
 
     /// Optimal portfolio with realised volatility ≈ @p target_volatility.

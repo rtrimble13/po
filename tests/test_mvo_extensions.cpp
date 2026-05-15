@@ -213,7 +213,7 @@ TEST_CASE("Tracking error is 0 when w = benchmark", "[mvo][benchmark][te]") {
     CHECK(m.active_share   == Approx(0.0).margin(1e-10));
 }
 
-TEST_CASE("Active share is 0.5 for fully-disjoint portfolio",
+TEST_CASE("Active share is 1.0 for fully-disjoint portfolio",
           "[mvo][benchmark][active_share]") {
     auto data = fiveAssets();
     data.benchmark_weights = Vector(5);

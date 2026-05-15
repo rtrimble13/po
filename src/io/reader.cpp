@@ -393,6 +393,7 @@ static void parseConstraintsJSON(const json& c, PortfolioConstraints& out) {
             out.current_weights[i] = cw[i].get<double>();
     }
     if (c.contains("groups")) {
+        out.groups.clear();
         for (const auto& g : c["groups"]) {
             GroupConstraint gc;
             gc.description = g.value("description", std::string{});
@@ -430,6 +431,7 @@ static void parseConstraintsTOML(const toml::table& c, PortfolioConstraints& out
             out.current_weights[i] = cw->get(i)->value_or(0.0);
     }
     if (auto* groups = c["groups"].as_array()) {
+        out.groups.clear();
         for (const auto& ge : *groups) {
             const auto* gt = ge.as_table();
             if (!gt) continue;

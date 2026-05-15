@@ -36,6 +36,7 @@
 #include <CLI/CLI.hpp>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -60,7 +61,8 @@ static io::WriterConfig makeWriterConfig(const std::string& fmt_str,
     cfg.explain        = explain;
 
     std::string f = fmt_str;
-    for (auto& c : f) c = static_cast<char>(std::tolower(c));
+    std::transform(f.begin(), f.end(), f.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
     if (f == "json")        cfg.format = io::OutputFormat::JSON;
     else if (f == "csv")    cfg.format = io::OutputFormat::CSV;
@@ -71,7 +73,8 @@ static io::WriterConfig makeWriterConfig(const std::string& fmt_str,
     if (cfg.format == io::OutputFormat::Console && !out_path.empty()) {
         fs::path p(out_path);
         auto ext = p.extension().string();
-        for (auto& c : ext) c = static_cast<char>(std::tolower(c));
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (ext == ".json") cfg.format = io::OutputFormat::JSON;
         else if (ext == ".csv") cfg.format = io::OutputFormat::CSV;
     }
@@ -607,7 +610,8 @@ int main(int argc, char* argv[]) {
     // Initialise logging
     log::Level lvl = log::Level::Info;
     std::string ll = log_level_str;
-    for (auto& c : ll) c = static_cast<char>(std::tolower(c));
+    std::transform(ll.begin(), ll.end(), ll.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     if      (ll == "trace")    lvl = log::Level::Trace;
     else if (ll == "debug")    lvl = log::Level::Debug;
     else if (ll == "warn")     lvl = log::Level::Warn;

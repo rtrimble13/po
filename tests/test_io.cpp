@@ -209,6 +209,67 @@ TEST_CASE("BL constraints under [black_litterman] are honoured", "[io][bl][const
     std::filesystem::remove(tmp);
 }
 
+TEST_CASE("BL constraints groups override MVO groups in JSON",
+          "[io][bl][constraints][groups]") {
+    std::string js = R"({
+        "mvo": {
+            "constraints": {
+                "groups": [
+                    { "description": "mvo-group",
+                      "coefficients": [1.0, 0.0, 0.0],
+                      "lower": -1.0, "upper": 0.2 }
+                ]
+            }
+        },
+        "black_litterman": {
+            "constraints": {
+                "groups": [
+                    { "description": "bl-group",
+                      "coefficients": [0.0, 1.0, 0.0],
+                      "lower": -1.0, "upper": 0.4 }
+                ]
+            }
+        }
+    })";
+
+    auto tmp = std::filesystem::temp_directory_path() / "_portopt_bl_groups_override.json";
+    { std::ofstream f(tmp); f << js; }
+
+    auto p = readBLParameters(tmp);
+    REQUIRE(p.mvo_params.constraints.groups.size() == 1);
+    CHECK(p.mvo_params.constraints.groups[0].description == "bl-group");
+    CHECK(p.mvo_params.constraints.groups[0].upper == Approx(0.4));
+    std::filesystem::remove(tmp);
+}
+
+TEST_CASE("BL constraints groups override MVO groups in TOML",
+          "[io][bl][constraints][groups][toml]") {
+    std::string toml = R"(
+[mvo.constraints]
+[[mvo.constraints.groups]]
+description = "mvo-group"
+coefficients = [1.0, 0.0, 0.0]
+lower = -1.0
+upper = 0.2
+
+[black_litterman.constraints]
+[[black_litterman.constraints.groups]]
+description = "bl-group"
+coefficients = [0.0, 1.0, 0.0]
+lower = -1.0
+upper = 0.4
+)";
+
+    auto tmp = std::filesystem::temp_directory_path() / "_portopt_bl_groups_override.toml";
+    { std::ofstream f(tmp); f << toml; }
+
+    auto p = readBLParameters(tmp);
+    REQUIRE(p.mvo_params.constraints.groups.size() == 1);
+    CHECK(p.mvo_params.constraints.groups[0].description == "bl-group");
+    CHECK(p.mvo_params.constraints.groups[0].upper == Approx(0.4));
+    std::filesystem::remove(tmp);
+}
+
 TEST_CASE("MVO constraints support budget + groups + turnover",
           "[io][mvo][constraints]") {
     std::string js = R"({

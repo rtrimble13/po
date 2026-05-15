@@ -26,8 +26,9 @@ using Vector = Eigen::VectorXd;
 struct Asset {
     std::string ticker;       ///< Unique identifier (e.g. "AAPL")
     std::string name;         ///< Human-readable name
-    double      expected_return{0.0}; ///< Annualised expected excess return
+    double      expected_return{0.0}; ///< Annualised expected return (μ — see notes)
     double      market_cap{0.0};      ///< Market capitalisation (for BL prior)
+    std::string sector;       ///< Optional group/sector label (e.g. "Technology")
 };
 
 /// Collection of assets forming the investment universe.
@@ -35,11 +36,30 @@ using AssetUniverse = std::vector<Asset>;
 
 // ── Constraints ──────────────────────────────────────────────────────────────
 
+/// A linear group constraint: lower ≤ a'w ≤ upper.
+struct GroupConstraint {
+    std::string  description;     ///< Human-readable label (e.g. "Technology weight")
+    Vector       coefficients;    ///< Coefficient vector a (size n)
+    double       lower{-1e30};    ///< Lower bound (use −∞ to disable)
+    double       upper{ 1e30};    ///< Upper bound (use +∞ to disable)
+};
+
 /// Weight bounds and linear constraints for portfolio construction.
 struct PortfolioConstraints {
-    Vector lower_bounds;   ///< Per-asset weight lower bounds (default 0)
-    Vector upper_bounds;   ///< Per-asset weight upper bounds (default 1)
+    Vector lower_bounds;            ///< Per-asset weight lower bounds (default 0)
+    Vector upper_bounds;            ///< Per-asset weight upper bounds (default 1)
     bool   allow_short_selling{false}; ///< If true, lower_bounds default to -1
+    double budget{1.0};             ///< Sum of weights (1.0 = fully invested,
+                                    ///< 0.0 = dollar-neutral L/S, 0.3 = 130/30 has budget=1 with bound 1.3/-0.3)
+
+    // ── Turnover / rebalancing (L2 penalty) ───────────────────────────────────
+    Vector current_weights;         ///< Current portfolio weights w₀ (empty = no penalty)
+    double turnover_penalty{0.0};   ///< κ in min ... + κ‖w − w₀‖²
+
+    // ── Linear group constraints (applied via penalty / soft enforcement) ─────
+    std::vector<GroupConstraint> groups;
+
+    // ── Convenience helpers ───────────────────────────────────────────────────
 
     /// Construct default long-only constraints for @p n assets.
     static PortfolioConstraints longOnly(int n) {
@@ -58,11 +78,52 @@ struct PortfolioConstraints {
         return c;
     }
 
+    /// Construct dollar-neutral long/short bounds (budget = 0).
+    static PortfolioConstraints dollarNeutral(int n, double max_gross = 1.0) {
+        PortfolioConstraints c;
+        c.lower_bounds = Vector::Constant(n, -max_gross);
+        c.upper_bounds = Vector::Constant(n,  max_gross);
+        c.allow_short_selling = true;
+        c.budget = 0.0;
+        return c;
+    }
+
+    /// Pin asset @p idx to weight @p w (lb = ub = w). Constraints must already be sized.
+    void fixWeight(int idx, double w) {
+        if (idx < 0 || idx >= static_cast<int>(lower_bounds.size()))
+            throw std::invalid_argument("fixWeight: index out of range");
+        lower_bounds[idx] = w;
+        upper_bounds[idx] = w;
+    }
+
+    /// Forbid (zero-weight) asset @p idx — equivalent to fixWeight(idx, 0).
+    void forbid(int idx) { fixWeight(idx, 0.0); }
+
     void validate(int n) const {
         if (lower_bounds.size() != n || upper_bounds.size() != n)
             throw std::invalid_argument("Constraint dimension mismatch");
         if ((lower_bounds.array() > upper_bounds.array()).any())
             throw std::invalid_argument("lower_bounds must be <= upper_bounds");
+        // Budget feasibility: sum(lb) ≤ budget ≤ sum(ub)
+        double lb_sum = lower_bounds.sum();
+        double ub_sum = upper_bounds.sum();
+        if (budget < lb_sum - 1e-9 || budget > ub_sum + 1e-9)
+            throw std::invalid_argument(
+                "Infeasible: budget=" + std::to_string(budget) +
+                " not in [sum(lb)=" + std::to_string(lb_sum) +
+                ", sum(ub)=" + std::to_string(ub_sum) + "]");
+        if (current_weights.size() != 0 && current_weights.size() != n)
+            throw std::invalid_argument("current_weights size mismatch");
+        if (turnover_penalty < 0.0)
+            throw std::invalid_argument("turnover_penalty must be >= 0");
+        for (const auto& g : groups) {
+            if (g.coefficients.size() != n)
+                throw std::invalid_argument(
+                    "Group constraint \"" + g.description + "\": coefficient size mismatch");
+            if (g.lower > g.upper)
+                throw std::invalid_argument(
+                    "Group constraint \"" + g.description + "\": lower > upper");
+        }
     }
 };
 
@@ -70,39 +131,71 @@ struct PortfolioConstraints {
 
 /// Parameters for a single Mean-Variance optimisation run.
 struct MVOParameters {
-    double risk_aversion{1.0};   ///< λ in min w'Σw − λ μ'w
-    int    frontier_points{50};  ///< Number of points on the efficient frontier
+    double risk_aversion{1.0};         ///< λ in min w'Σw − λ μ'w
+    int    frontier_points{50};        ///< Number of points on the efficient frontier
     double min_risk_aversion{0.01};
     double max_risk_aversion{100.0};
+
+    /// Risk-free rate (annualised). Used in Sharpe calculation: (μ_p − r_f)/σ.
+    /// If expected_returns are already excess returns, leave this at 0.
+    double risk_free_rate{0.0};
+
+    /// Penalty weight on group-constraint violations (soft enforcement).
+    /// Set to 0 to disable group constraints, larger values enforce more strictly.
+    double group_penalty{1e3};
+
     PortfolioConstraints constraints;
 };
 
 // ── Black-Litterman parameters ───────────────────────────────────────────────
 
+/// Method used to translate view confidence into the Ω matrix.
+enum class ViewConfidenceMode {
+    Variance,   ///< View.confidence is interpreted as variance (Ω_ii directly)
+    Idzorek     ///< View.confidence ∈ [0,1] is a percentage; Ω computed via Idzorek (2005)
+};
+
 /// A single investor view for the Black-Litterman model.
 struct View {
-    std::string description;   ///< Human-readable description
-    Vector      pick_vector;   ///< Row of the P matrix (asset weights in view)
+    std::string description;      ///< Human-readable description
+    Vector      pick_vector;      ///< Row of the P matrix (asset weights in view)
     double      expected_return;  ///< q: expected excess return
-    double      confidence{0.1};  ///< Variance of this view (Omega diagonal)
+    double      confidence{0.1};  ///< Interpretation depends on confidence_mode (see params)
 };
 
 /// Parameters for the Black-Litterman model.
 struct BlackLittermanParameters {
-    double tau{0.05};           ///< Uncertainty scaling of the prior (τ)
-    double risk_aversion{2.5};  ///< Market risk aversion (δ), used to back out π
-    std::vector<View> views;    ///< Investor views
-    MVOParameters mvo_params;   ///< MVO params applied to BL posterior returns
+    double tau{0.05};                  ///< Uncertainty scaling of the prior (τ)
+    double risk_aversion{2.5};         ///< Market risk aversion (δ), used to back out π
+    std::vector<View> views;           ///< Investor views
+    MVOParameters mvo_params;          ///< MVO params applied to BL posterior returns
+    ViewConfidenceMode confidence_mode{ViewConfidenceMode::Variance};
+    bool propagate_risk_aversion{true};///< If true, mvo_params.risk_aversion defaults to risk_aversion
+                                       ///< when mvo_params.risk_aversion == 1.0 (its default).
 };
 
 // ── Optimization results ─────────────────────────────────────────────────────
 
 /// Portfolio analytics for a single optimal point.
 struct PortfolioMetrics {
-    double expected_return{0.0}; ///< μ'w
-    double volatility{0.0};      ///< sqrt(w'Σw)
-    double sharpe_ratio{0.0};    ///< expected_return / volatility
-    double variance{0.0};        ///< w'Σw
+    double expected_return{0.0};        ///< μ'w
+    double volatility{0.0};             ///< sqrt(w'Σw)
+    double sharpe_ratio{0.0};           ///< (μ'w − r_f) / σ
+    double variance{0.0};               ///< w'Σw
+
+    // Risk decomposition
+    Vector risk_contribution;           ///< RC_i = w_i (Σw)_i / σ  — sums to σ
+    double diversification_ratio{0.0};  ///< (Σ w_i σ_i) / σ_p  (higher = more diversified)
+    double effective_n_assets{0.0};     ///< 1 / Σ w_i² (Herfindahl-based)
+
+    // Benchmark-relative (NaN if no benchmark)
+    double tracking_error{std::numeric_limits<double>::quiet_NaN()};
+    double information_ratio{std::numeric_limits<double>::quiet_NaN()};
+    double active_share{std::numeric_limits<double>::quiet_NaN()};
+    double beta_to_benchmark{std::numeric_limits<double>::quiet_NaN()};
+
+    // Trading
+    double turnover{std::numeric_limits<double>::quiet_NaN()}; ///< ‖w − w_prev‖₁ / 2 if w_prev given
 };
 
 /// Result of a single portfolio optimisation.
@@ -114,6 +207,12 @@ struct OptimizationResult {
     int                iterations{0};
     std::string        method;       ///< "MVO" or "Black-Litterman"
     std::string        status_message;
+    double             solve_time_ms{0.0};
+
+    // Diagnostics for "explain" mode
+    Vector             gradient_at_optimum;   ///< Σw − λμ at the solution
+    std::vector<int>   active_lower_bounds;   ///< Indices where w_i = lb_i
+    std::vector<int>   active_upper_bounds;   ///< Indices where w_i = ub_i
 };
 
 /// A single point on the efficient frontier.
@@ -135,9 +234,11 @@ struct EfficientFrontier {
 /// Raw market data for building μ and Σ.
 struct MarketData {
     AssetUniverse       assets;
-    Vector              expected_returns;  ///< μ vector (n×1)
-    Matrix              covariance;        ///< Σ matrix (n×n)
-    std::optional<Vector> market_weights;  ///< w_mkt for BL (optional)
+    Vector              expected_returns;     ///< μ vector (n×1)
+    Matrix              covariance;           ///< Σ matrix (n×n)
+    std::optional<Vector> market_weights;     ///< w_mkt for BL (optional)
+    std::optional<Vector> benchmark_weights;  ///< b for tracking-error / IR / active share
+    double              risk_free_rate{0.0};  ///< Annualised r_f, used in Sharpe
 };
 
 } // namespace portopt

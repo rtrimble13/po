@@ -5,22 +5,28 @@
  *
  * Supports console (human-readable table), JSON, and CSV output.
  *
- * ### JSON output schema
+ * ### Console rendering
+ *
+ * Default uses Unicode box-drawing characters (e.g. ═, ─). Set
+ * `WriterConfig::ascii_only = true` to fall back to ASCII for terminals
+ * that don't render UTF-8 (notably the legacy Windows console).
+ *
+ * ### JSON output schema (single result)
  * @code{.json}
  * {
  *   "method":  "MVO",
  *   "converged": true,
  *   "iterations": 42,
- *   "metrics": { "expected_return": 0.12, "volatility": 0.18,
- *                "sharpe_ratio": 0.67,    "variance": 0.0324 },
- *   "weights": [ { "ticker": "AAPL", "weight": 0.35 }, ... ]
+ *   "solve_time_ms": 1.23,
+ *   "metrics": { "expected_return": ..., "volatility": ...,
+ *                "sharpe_ratio": ..., "tracking_error": ...,
+ *                "information_ratio": ..., "active_share": ...,
+ *                "beta_to_benchmark": ..., "turnover": ...,
+ *                "diversification_ratio": ..., "effective_n_assets": ... },
+ *   "weights": [ { "ticker": "AAPL", "weight": 0.35,
+ *                  "risk_contribution": 0.08 }, ... ],
+ *   "active_constraints": { "lower": [...indices], "upper": [...indices] }
  * }
- * @endcode
- *
- * ### CSV output (one row per asset)
- * @code
- * ticker,name,weight,expected_return,volatility,sharpe_ratio
- * AAPL,Apple Inc.,0.35,...
  * @endcode
  */
 
@@ -43,51 +49,30 @@ struct WriterConfig {
     int          console_return_prec{4}; ///< Decimal places for returns
     bool         show_zero_weights{false}; ///< Include assets with w≈0
     double       weight_threshold{1e-6};   ///< Threshold for "near zero"
+    bool         ascii_only{false};        ///< Use ASCII separators (no Unicode box chars)
+    double       total_capital{0.0};       ///< If > 0, print notional $ per asset
+    bool         show_risk_contribution{true};
+    bool         explain{false};           ///< Print active bounds + gradient diagnostics
 };
 
 // ── Single result ────────────────────────────────────────────────────────────
 
-/**
- * @brief Write optimisation result to an output stream.
- *
- * @param result  Optimisation result
- * @param out     Destination stream
- * @param cfg     Writer configuration
- */
 void writeResult(const OptimizationResult& result,
                  std::ostream&             out,
                  const WriterConfig&       cfg = {});
 
-/**
- * @brief Write optimisation result to a file.
- *
- * Format is inferred from the file extension (.json → JSON, .csv → CSV)
- * unless overridden via cfg.format.
- */
 void writeResult(const OptimizationResult& result,
                  const std::filesystem::path& path,
                  const WriterConfig&          cfg = {});
 
-/**
- * @brief Serialise OptimizationResult to a JSON string.
- */
-std::string resultToJSON(const OptimizationResult& result,
-                         int indent = 2);
+/// Serialise OptimizationResult to a JSON string.
+std::string resultToJSON(const OptimizationResult& result, int indent = 2);
 
-/**
- * @brief Serialise OptimizationResult to a CSV string.
- */
+/// Serialise OptimizationResult to a CSV string (header + per-asset rows + metrics).
 std::string resultToCSV(const OptimizationResult& result);
 
 // ── Efficient frontier ────────────────────────────────────────────────────────
 
-/**
- * @brief Write efficient frontier to a stream.
- *
- * Console: table of (λ, return, volatility, Sharpe)
- * JSON:    array of frontier points with full weight vectors
- * CSV:     one row per frontier point
- */
 void writeFrontier(const EfficientFrontier& frontier,
                    std::ostream&            out,
                    const WriterConfig&      cfg = {});
@@ -101,9 +86,6 @@ std::string frontierToCSV(const EfficientFrontier&  frontier);
 
 // ── Black-Litterman diagnostics ───────────────────────────────────────────────
 
-/**
- * @brief Write BL model internals (prior/posterior returns, views).
- */
 void writeBLModel(const BLModelOutput& bl,
                   const AssetUniverse& assets,
                   std::ostream&        out,

@@ -8,6 +8,7 @@
 #include <portopt/io/writer.hpp>
 
 #include <sstream>
+#include <fstream>
 #include <filesystem>
 
 using namespace portopt;
@@ -178,6 +179,160 @@ TEST_CASE("frontierToCSV — has correct columns", "[io][writer][frontier]") {
     CHECK(csv.find("risk_aversion") != std::string::npos);
     CHECK(csv.find("volatility") != std::string::npos);
     CHECK(csv.find(",A,") != std::string::npos || csv.find(",A") != std::string::npos);
+}
+
+// ── BL constraints lookup ────────────────────────────────────────────────────
+
+TEST_CASE("BL constraints under [black_litterman] are honoured", "[io][bl][constraints]") {
+    // Inline JSON with constraints under bl section
+    std::string js = R"({
+        "mvo": { "risk_aversion": 1.0 },
+        "black_litterman": {
+            "tau": 0.05,
+            "risk_aversion": 2.5,
+            "constraints": {
+                "lower_bounds": [0.1, 0.1, 0.1],
+                "upper_bounds": [0.5, 0.5, 0.5],
+                "budget": 1.0
+            }
+        }
+    })";
+    auto tmp = std::filesystem::temp_directory_path() / "_portopt_bl_cstr.json";
+    {
+        std::ofstream f(tmp);
+        f << js;
+    }
+    auto p = readBLParameters(tmp);
+    REQUIRE(p.mvo_params.constraints.lower_bounds.size() == 3);
+    CHECK(p.mvo_params.constraints.lower_bounds[0] == Approx(0.1));
+    CHECK(p.mvo_params.constraints.upper_bounds[0] == Approx(0.5));
+    std::filesystem::remove(tmp);
+}
+
+TEST_CASE("BL constraints groups override MVO groups in JSON",
+          "[io][bl][constraints][groups]") {
+    std::string js = R"({
+        "mvo": {
+            "constraints": {
+                "groups": [
+                    { "description": "mvo-group",
+                      "coefficients": [1.0, 0.0, 0.0],
+                      "lower": -1.0, "upper": 0.2 }
+                ]
+            }
+        },
+        "black_litterman": {
+            "constraints": {
+                "groups": [
+                    { "description": "bl-group",
+                      "coefficients": [0.0, 1.0, 0.0],
+                      "lower": -1.0, "upper": 0.4 }
+                ]
+            }
+        }
+    })";
+
+    auto tmp = std::filesystem::temp_directory_path() / "_portopt_bl_groups_override.json";
+    { std::ofstream f(tmp); f << js; }
+
+    auto p = readBLParameters(tmp);
+    REQUIRE(p.mvo_params.constraints.groups.size() == 1);
+    CHECK(p.mvo_params.constraints.groups[0].description == "bl-group");
+    CHECK(p.mvo_params.constraints.groups[0].upper == Approx(0.4));
+    std::filesystem::remove(tmp);
+}
+
+TEST_CASE("BL constraints groups override MVO groups in TOML",
+          "[io][bl][constraints][groups][toml]") {
+    std::string toml = R"(
+[mvo.constraints]
+[[mvo.constraints.groups]]
+description = "mvo-group"
+coefficients = [1.0, 0.0, 0.0]
+lower = -1.0
+upper = 0.2
+
+[black_litterman.constraints]
+[[black_litterman.constraints.groups]]
+description = "bl-group"
+coefficients = [0.0, 1.0, 0.0]
+lower = -1.0
+upper = 0.4
+)";
+
+    auto tmp = std::filesystem::temp_directory_path() / "_portopt_bl_groups_override.toml";
+    { std::ofstream f(tmp); f << toml; }
+
+    auto p = readBLParameters(tmp);
+    REQUIRE(p.mvo_params.constraints.groups.size() == 1);
+    CHECK(p.mvo_params.constraints.groups[0].description == "bl-group");
+    CHECK(p.mvo_params.constraints.groups[0].upper == Approx(0.4));
+    std::filesystem::remove(tmp);
+}
+
+TEST_CASE("MVO constraints support budget + groups + turnover",
+          "[io][mvo][constraints]") {
+    std::string js = R"({
+        "mvo": {
+            "risk_aversion": 2.0,
+            "constraints": {
+                "lower_bounds": [-0.5, -0.5, -0.5],
+                "upper_bounds": [ 0.5,  0.5,  0.5],
+                "budget": 0.0,
+                "turnover_penalty": 0.1,
+                "current_weights": [0.0, 0.0, 0.0],
+                "groups": [
+                    { "description": "first two",
+                      "coefficients": [1.0, 1.0, 0.0],
+                      "lower": 0.0, "upper": 0.3 }
+                ]
+            }
+        }
+    })";
+    auto tmp = std::filesystem::temp_directory_path() / "_portopt_mvo_cstr.json";
+    { std::ofstream f(tmp); f << js; }
+    auto p = readMVOParameters(tmp);
+    CHECK(p.constraints.budget == Approx(0.0));
+    CHECK(p.constraints.turnover_penalty == Approx(0.1));
+    REQUIRE(p.constraints.groups.size() == 1);
+    CHECK(p.constraints.groups[0].upper == Approx(0.3));
+    std::filesystem::remove(tmp);
+}
+
+// ── Returns CSV ──────────────────────────────────────────────────────────────
+
+TEST_CASE("readReturnsCSV produces MarketData", "[io][returns]") {
+    auto tmp = std::filesystem::temp_directory_path() / "_portopt_returns.csv";
+    {
+        std::ofstream f(tmp);
+        f << "date,A,B\n";
+        for (int t = 0; t < 100; ++t) {
+            f << t << "," << 0.001 + 0.0001 * t << "," << -0.001 + 0.0002 * t << "\n";
+        }
+    }
+    auto md = readReturnsCSV(tmp, 252.0, "ledoit-wolf");
+    CHECK(md.assets.size() == 2);
+    CHECK(md.covariance.rows() == 2);
+    std::filesystem::remove(tmp);
+}
+
+// ── Benchmark / risk-free in JSON ────────────────────────────────────────────
+
+TEST_CASE("JSON market data includes benchmark and rf", "[io][json][benchmark]") {
+    std::string j = R"({
+        "assets": [
+            {"ticker": "A", "expected_return": 0.10},
+            {"ticker": "B", "expected_return": 0.15}
+        ],
+        "covariance": [[0.04, 0.01], [0.01, 0.09]],
+        "market_weights":    [0.5, 0.5],
+        "benchmark_weights": [0.4, 0.6],
+        "risk_free_rate": 0.03
+    })";
+    auto md = readMarketDataFromJSON(j);
+    REQUIRE(md.benchmark_weights.has_value());
+    CHECK((*md.benchmark_weights)[0] == Approx(0.4));
+    CHECK(md.risk_free_rate == Approx(0.03));
 }
 
 TEST_CASE("frontierToJSON — serialises correctly", "[io][writer][frontier]") {

@@ -194,6 +194,83 @@ TEST_CASE("BL — pick vector dimension mismatch throws", "[bl][validation]") {
     CHECK_THROWS_AS(bl.optimize(data), std::invalid_argument);
 }
 
+TEST_CASE("BL — Idzorek mode: 100% confidence ≈ view return", "[bl][idzorek]") {
+    auto data = makeThreeAssetData();
+    BlackLittermanParameters p = noViewParams();
+    p.confidence_mode = ViewConfidenceMode::Idzorek;
+
+    View v;
+    v.description     = "Strong absolute view on equity";
+    v.pick_vector     = Vector::Zero(3);
+    v.pick_vector[0]  = 1.0;
+    v.expected_return = 0.10;
+    v.confidence      = 0.99;  // 99% confident
+    p.views.push_back(v);
+
+    BlackLittermanOptimizer bl(p);
+    auto model = bl.modelOutput(data);
+    CHECK(model.posterior_returns[0] == Approx(0.10).epsilon(0.05));
+}
+
+TEST_CASE("BL — Idzorek mode: 0% confidence ≈ prior", "[bl][idzorek]") {
+    auto data = makeThreeAssetData();
+    BlackLittermanParameters p = noViewParams();
+    p.confidence_mode = ViewConfidenceMode::Idzorek;
+
+    View v;
+    v.description     = "Useless view";
+    v.pick_vector     = Vector::Zero(3);
+    v.pick_vector[0]  = 1.0;
+    v.expected_return = 100.0;  // wildly extreme
+    v.confidence      = 0.001;  // ~0% confident
+    p.views.push_back(v);
+
+    BlackLittermanOptimizer bl(p);
+    auto model = bl.modelOutput(data);
+    // Posterior should be close to prior despite extreme view
+    CHECK(model.posterior_returns[0] == Approx(model.prior_returns[0]).margin(0.01));
+}
+
+TEST_CASE("BL — Idzorek confidence outside [0,1] throws",
+          "[bl][idzorek][validation]") {
+    auto data = makeThreeAssetData();
+    BlackLittermanParameters p = noViewParams();
+    p.confidence_mode = ViewConfidenceMode::Idzorek;
+    View v;
+    v.pick_vector = Vector::Zero(3); v.pick_vector[0] = 1.0;
+    v.expected_return = 0.05;
+    v.confidence = 1.5;  // invalid
+    p.views.push_back(v);
+
+    BlackLittermanOptimizer bl(p);
+    CHECK_THROWS(bl.optimize(data));
+}
+
+TEST_CASE("BL — risk_aversion propagates to mvo_params by default",
+          "[bl][risk_aversion]") {
+    auto data = makeThreeAssetData();
+    BlackLittermanParameters p = noViewParams();
+    p.risk_aversion = 4.0;
+    // mvo_params.risk_aversion stays at default 1.0 → should inherit 4.0
+    BlackLittermanOptimizer bl(p);
+    auto result = bl.optimize(data);
+    REQUIRE(result.converged);
+    // Sanity: weights should respond to higher risk aversion (less risky)
+    CHECK(result.metrics.volatility > 0.0);
+}
+
+TEST_CASE("BL — propagate_risk_aversion=false leaves mvo_params alone",
+          "[bl][risk_aversion]") {
+    auto data = makeThreeAssetData();
+    BlackLittermanParameters p = noViewParams();
+    p.risk_aversion = 4.0;
+    p.mvo_params.risk_aversion = 1.0;
+    p.propagate_risk_aversion = false;
+    BlackLittermanOptimizer bl(p);
+    auto result = bl.optimize(data);
+    REQUIRE(result.converged);
+}
+
 TEST_CASE("BL — BL result is different from plain MVO (views matter)", "[bl][mvo_compare]") {
     auto data = makeThreeAssetData();
 

@@ -5,13 +5,13 @@
  *
  * Solves the classic portfolio selection problem:
  *
- *   min  w' Σ w − λ μ' w
- *   s.t. 1'w = 1
+ *   min  w' Σ w − λ μ' w  (+ optional turnover / group penalties)
+ *   s.t. 1'w = b              (budget; default 1)
  *        lb_i <= w_i <= ub_i
  *
- * where Σ is the asset covariance matrix, μ is the vector of expected excess
- * returns, and λ is the risk-aversion parameter.  Sweeping λ traces the
- * efficient frontier from minimum-variance to maximum-return portfolios.
+ * where Σ is the asset covariance matrix, μ is the vector of expected
+ * returns, λ is the risk-aversion parameter, and b is the budget.
+ * Sweeping λ traces the efficient frontier.
  */
 
 #include "optimizer.hpp"
@@ -32,6 +32,12 @@ namespace portopt {
  *   MVOptimizer opt(params);
  *   auto result   = opt.optimize(data);
  *   auto frontier = opt.efficientFrontier(data);
+ *
+ *   // PM-friendly helpers
+ *   auto min_var  = opt.minVariancePortfolio(data);
+ *   auto max_shp  = opt.maxSharpePortfolio(data);
+ *   auto tgt_vol  = opt.optimizeForTargetVolatility(data, 0.15); // 15% vol
+ *   auto tgt_ret  = opt.optimizeForTargetReturn(data, 0.10);     // 10% return
  * @endcode
  */
 class MVOptimizer : public IOptimizer {
@@ -54,6 +60,24 @@ public:
      */
     EfficientFrontier efficientFrontier(const MarketData& data) override;
 
+    // ── PM-friendly portfolio constructors ───────────────────────────────────
+
+    /// Minimum-variance portfolio (λ → 0).
+    OptimizationResult minVariancePortfolio(const MarketData& data);
+
+    /// Maximum-Sharpe (tangency) portfolio. Found by a coarse logarithmic
+    /// sweep over λ followed by golden-section refinement.
+    OptimizationResult maxSharpePortfolio(const MarketData& data);
+
+    /// Optimal portfolio with realised volatility ≈ @p target_volatility.
+    /// Binary-search over λ on the efficient frontier.
+    OptimizationResult optimizeForTargetVolatility(const MarketData& data,
+                                                    double target_volatility);
+
+    /// Optimal portfolio with expected return ≈ @p target_return.
+    OptimizationResult optimizeForTargetReturn(const MarketData& data,
+                                                double target_return);
+
     /// Update optimiser parameters.
     void setParameters(const MVOParameters& params) { params_ = params; }
 
@@ -66,11 +90,32 @@ public:
      * @param weights  Weight vector (n×1)
      * @param mu       Expected returns (n×1)
      * @param sigma    Covariance matrix (n×n)
-     * @return         Computed PortfolioMetrics
+     * @param risk_free_rate  Risk-free rate for Sharpe (default 0)
+     * @return         Computed PortfolioMetrics (return, vol, Sharpe, variance, RC, …)
      */
     static PortfolioMetrics computeMetrics(const Vector& weights,
                                            const Vector& mu,
-                                           const Matrix& sigma);
+                                           const Matrix& sigma,
+                                           double risk_free_rate = 0.0);
+
+    /**
+     * @brief Augment a metrics block with benchmark-relative quantities.
+     *
+     * Updates tracking_error, information_ratio, active_share, beta_to_benchmark.
+     */
+    static void augmentBenchmarkMetrics(PortfolioMetrics& metrics,
+                                        const Vector& weights,
+                                        const Vector& mu,
+                                        const Matrix& sigma,
+                                        const Vector& benchmark_weights,
+                                        double risk_free_rate = 0.0);
+
+    /**
+     * @brief Validate covariance PSD-ness and other inputs.
+     *
+     * Throws std::invalid_argument with descriptive message on failure.
+     */
+    static void validateMarketData(const MarketData& data);
 
 private:
     MVOParameters    params_;

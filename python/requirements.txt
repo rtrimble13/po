@@ -1,0 +1,11 @@
+# Runtime dependencies for portopt Python helpers and the diagnostic notebook.
+# The compiled module (_portopt.*.so/.pyd) is built via CMake and added to
+# PYTHONPATH separately — no PyPI install is required for the core extension.
+
+numpy>=1.23
+pandas>=2.0
+matplotlib>=3.7
+# Optional, for the diagnostic report
+jupyter>=1.0
+nbconvert>=7.0
+ipykernel>=6.0

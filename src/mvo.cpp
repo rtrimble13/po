@@ -180,7 +180,11 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
     result.solve_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.gradient_at_optimum = qp.gradient;
 
-    const double rf = data.risk_free_rate + params_.risk_free_rate;
+    // Use params_.risk_free_rate as an explicit override when provided;
+    // otherwise fall back to the market-data risk-free rate.
+    const double rf = (params_.risk_free_rate != 0.0)
+                        ? params_.risk_free_rate
+                        : data.risk_free_rate;
     result.metrics = computeMetrics(qp.x, data.expected_returns,
                                     data.covariance, rf);
 

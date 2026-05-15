@@ -164,6 +164,77 @@ MVO is run with:
 - Expected returns: **μ_BL**
 - Covariance: **Σ + Σ_BL** (includes estimation uncertainty)
 
+#### Idzorek (2005) view confidence
+
+Setting Ω directly as a variance is unintuitive. Set
+`confidence_mode = ViewConfidenceMode::Idzorek` and pass `confidence ∈ [0, 1]`
+on each view to interpret it as a percentage. portopt then derives Ω so that
+the posterior tilt for each view k equals `c_k * d_k` where d_k is the
+100%-confident tilt:
+
+```
+ω_k = (p_k' τΣ p_k) · (1/c_k − 1)
+```
+
+- `c_k = 0.5` → posterior moves half-way to the certain answer
+- `c_k → 1.0` → posterior matches the view exactly
+- `c_k → 0.0` → view ignored
+
+### 2.4 Estimation from a returns time series
+
+`portopt::estimation::fromReturns` (Python: `portopt.estimation.from_returns`,
+CLI: `--returns`) converts a T×n returns matrix into a `MarketData` object:
+
+| Estimator        | Use when                              |
+|------------------|---------------------------------------|
+| `none`           | T ≫ n and Σ is well-conditioned       |
+| `linear`         | You want manual control over δ        |
+| `ledoit-wolf`    | Default for n ≈ T or correlated assets|
+| `oas`            | T < n (small-sample regime)           |
+
+Shrinkage is recommended any time MVO produces concentrated corner solutions
+on noisy inputs — typically halves the L2 distance from the true frontier.
+
+### 2.5 Portfolio constraints
+
+| Feature              | Configured by                                              |
+|----------------------|-----------------------------------------------------------|
+| Long-only / shorts   | `lower_bounds`, `upper_bounds`, `withShorts`              |
+| Dollar-neutral L/S   | `PortfolioConstraints::dollarNeutral(n)` (budget = 0)     |
+| Fix / forbid assets  | `fixWeight(i, w)` / `forbid(i)` helpers (translate to lb=ub)|
+| Group caps (soft)    | `groups` vector; enforced via quadratic penalty           |
+| Turnover penalty     | `current_weights` + `turnover_penalty` (κ in L2 form)     |
+| Risk-free rate       | `MVOParameters::risk_free_rate` or `MarketData::risk_free_rate` |
+| Benchmark            | `MarketData::benchmark_weights` (drives TE / IR / active share / β) |
+
+Group constraints are *soft*: they're enforced by adding a quadratic penalty
+`0.5 κ Σ max(0, viol)²` to the objective. Set `MVOParameters::group_penalty`
+high (e.g. 1e6) for near-hard enforcement; the trade-off is solver stiffness.
+
+### 2.6 PM-friendly portfolio helpers
+
+| Method                              | Definition                                  |
+|-------------------------------------|----------------------------------------------|
+| `minVariancePortfolio`              | λ → 0 (global minimum variance)              |
+| `maxSharpePortfolio`                | argmax_w (μ'w − r_f) / sqrt(w'Σw)            |
+| `optimizeForTargetVolatility(σ_t)`  | Binary search over λ                         |
+| `optimizeForTargetReturn(μ_t)`      | Binary search over λ                         |
+
+All four respect the active constraints and turnover penalty.
+
+### 2.7 Portfolio metrics
+
+Each `OptimizationResult.metrics` exposes:
+
+- `expected_return`, `volatility`, `variance`
+- `sharpe_ratio = (μ_p − r_f) / σ_p`
+- `risk_contribution[i] = w_i (Σw)_i / σ_p` (sums to σ_p)
+- `diversification_ratio = (Σ |w_i| σ_i) / σ_p`
+- `effective_n_assets = 1 / Σ w_i²`
+- Benchmark-relative (NaN if no benchmark): `tracking_error`, `information_ratio`,
+  `active_share`, `beta_to_benchmark`
+- `turnover = ½‖w − w_prev‖₁` (NaN if no `current_weights`)
+
 ---
 
 ## 3. Input data specification

@@ -20,7 +20,7 @@
  *   P μ ~ N(q, Ω)
  * @endcode
  * where P is the pick matrix (k×n), q is the expected-return vector (k×1),
- * and Ω = diag(ω) is the view uncertainty matrix.
+ * and Ω is the view uncertainty matrix.
  *
  * **Posterior expected returns:**
  * @code
@@ -30,6 +30,15 @@
  *
  * The posterior covariance used in MVO is Σ + Σ_BL (parameter uncertainty
  * adds to market risk).
+ *
+ * ### Ω construction
+ *
+ * - **ViewConfidenceMode::Variance**: View.confidence is used directly as
+ *   the diagonal of Ω. Smaller = more confident. Industry-standard but
+ *   unintuitive to set.
+ * - **ViewConfidenceMode::Idzorek**: View.confidence ∈ [0,1] is a percentage
+ *   confidence level (1 = certain, 0 = no information). Ω is derived using
+ *   the Idzorek (2005) procedure that matches the implied tilt against τΣ.
  */
 
 #include "optimizer.hpp"
@@ -45,7 +54,8 @@ struct BLModelOutput {
     Matrix blended_cov;         ///< Σ + Σ_BL — total covariance for MVO
     Matrix pick_matrix;         ///< P
     Vector view_returns;        ///< q
-    Matrix view_uncertainty;    ///< Ω (diagonal)
+    Matrix view_uncertainty;    ///< Ω (full matrix — diagonal under both modes)
+    Vector view_confidence_pct; ///< Reported confidence ∈ [0,1] for each view
 };
 
 /**
@@ -56,9 +66,10 @@ struct BLModelOutput {
  *   BlackLittermanParameters params;
  *   params.tau = 0.05;
  *   params.risk_aversion = 2.5;
+ *   params.confidence_mode = ViewConfidenceMode::Idzorek;
  *   params.views = {
- *       { "Tech outperforms", p1, 0.03, 0.001 },
- *       { "Bonds underperform", p2, -0.02, 0.002 }
+ *       { "Tech outperforms", p1, 0.03, 0.50 },   // 50% confident
+ *       { "Bonds underperform", p2, -0.02, 0.75 } // 75% confident
  *   };
  *
  *   BlackLittermanOptimizer bl(params);
@@ -99,6 +110,7 @@ private:
     BLModelOutput computeModel(const MarketData& data) const;
     MarketData    buildBLMarketData(const MarketData& data,
                                     const BLModelOutput& bl) const;
+    MVOParameters resolveMVOParameters() const;
     void validateData(const MarketData& data) const;
 };
 

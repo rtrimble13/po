@@ -2,7 +2,9 @@ add_executable(portopt_tests
     test_main.cpp
     test_qp_solver.cpp
     test_mvo.cpp
+    test_mvo_extensions.cpp
     test_black_litterman.cpp
+    test_estimation.cpp
     test_io.cpp
     test_integration.cpp
 )

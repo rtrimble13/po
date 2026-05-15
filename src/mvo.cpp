@@ -1,7 +1,9 @@
 #include <portopt/mvo.hpp>
 #include <portopt/logging.hpp>
 
+#include <chrono>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace portopt {
@@ -15,31 +17,127 @@ MVOptimizer::MVOptimizer(MVOParameters params)
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
-void MVOptimizer::validateData(const MarketData& data) const {
+void MVOptimizer::validateMarketData(const MarketData& data) {
     const int n = static_cast<int>(data.assets.size());
     if (n == 0)
         throw std::invalid_argument("MVO: asset universe is empty");
     if (data.expected_returns.size() != n)
-        throw std::invalid_argument("MVO: expected_returns size mismatch");
+        throw std::invalid_argument(
+            "MVO: expected_returns size mismatch (got " +
+            std::to_string(data.expected_returns.size()) +
+            ", expected " + std::to_string(n) + ")");
     if (data.covariance.rows() != n || data.covariance.cols() != n)
-        throw std::invalid_argument("MVO: covariance matrix size mismatch");
-    // Symmetry check (loose)
-    if ((data.covariance - data.covariance.transpose()).norm() > 1e-6 * data.covariance.norm())
+        throw std::invalid_argument(
+            "MVO: covariance matrix size mismatch (got " +
+            std::to_string(data.covariance.rows()) + "x" +
+            std::to_string(data.covariance.cols()) +
+            ", expected " + std::to_string(n) + "x" + std::to_string(n) + ")");
+
+    // Symmetry check (relative tolerance)
+    const double sym_err = (data.covariance - data.covariance.transpose()).norm();
+    if (sym_err > 1e-6 * std::max(1.0, data.covariance.norm()))
         throw std::invalid_argument("MVO: covariance matrix is not symmetric");
+
+    // Diagonal must be non-negative (variances)
+    for (int i = 0; i < n; ++i) {
+        if (data.covariance(i, i) < -1e-10)
+            throw std::invalid_argument(
+                "MVO: covariance has negative diagonal at index " + std::to_string(i));
+    }
+
+    // PSD check via LDLT (fast for symmetric matrices)
+    Eigen::LDLT<Matrix> ldlt(0.5 * (data.covariance + data.covariance.transpose()));
+    if (ldlt.info() != Eigen::Success) {
+        log::warn("MVO: covariance LDLT decomposition failed; "
+                  "matrix may be indefinite — proceeding with caution");
+    } else {
+        const Vector d = ldlt.vectorD();
+        const double min_d = d.minCoeff();
+        const double max_d = d.maxCoeff();
+        if (min_d < -1e-8 * std::max(1.0, std::abs(max_d))) {
+            log::warn("MVO: covariance is not positive semi-definite "
+                      "(min eigval ≈ {:.3e}); consider shrinkage or regularisation",
+                      min_d);
+        }
+    }
+
+    if (data.benchmark_weights.has_value() &&
+        data.benchmark_weights->size() != n)
+        throw std::invalid_argument("MVO: benchmark_weights size mismatch");
+}
+
+void MVOptimizer::validateData(const MarketData& data) const {
+    validateMarketData(data);
 }
 
 // ── Portfolio metrics ─────────────────────────────────────────────────────────
 
 PortfolioMetrics MVOptimizer::computeMetrics(const Vector& w,
                                              const Vector& mu,
-                                             const Matrix& sigma) {
+                                             const Matrix& sigma,
+                                             double risk_free_rate) {
     PortfolioMetrics m;
     m.expected_return = w.dot(mu);
-    m.variance        = w.dot(sigma * w);
+    const Vector sigma_w = sigma * w;
+    m.variance        = w.dot(sigma_w);
     m.volatility      = std::sqrt(std::max(0.0, m.variance));
-    m.sharpe_ratio    = (m.volatility > 1e-12)
-                        ? m.expected_return / m.volatility : 0.0;
+
+    if (m.volatility > 1e-12) {
+        m.sharpe_ratio = (m.expected_return - risk_free_rate) / m.volatility;
+    } else {
+        m.sharpe_ratio = std::numeric_limits<double>::quiet_NaN();
+    }
+
+    // Risk contributions: RC_i = w_i (Σw)_i / σ
+    const int n = static_cast<int>(w.size());
+    m.risk_contribution = Vector::Zero(n);
+    if (m.volatility > 1e-12) {
+        for (int i = 0; i < n; ++i)
+            m.risk_contribution[i] = w[i] * sigma_w[i] / m.volatility;
+    }
+
+    // Diversification ratio: (Σ |w_i| σ_i) / σ_p
+    if (m.volatility > 1e-12) {
+        double weighted_vol = 0.0;
+        for (int i = 0; i < n; ++i)
+            weighted_vol += std::abs(w[i]) * std::sqrt(std::max(0.0, sigma(i, i)));
+        m.diversification_ratio = weighted_vol / m.volatility;
+    }
+
+    // Effective number of assets (Herfindahl)
+    const double sumsq = w.squaredNorm();
+    m.effective_n_assets = (sumsq > 1e-15) ? 1.0 / sumsq
+                                            : std::numeric_limits<double>::quiet_NaN();
+
     return m;
+}
+
+void MVOptimizer::augmentBenchmarkMetrics(PortfolioMetrics& metrics,
+                                          const Vector& w,
+                                          const Vector& mu,
+                                          const Matrix& sigma,
+                                          const Vector& benchmark,
+                                          double risk_free_rate) {
+    if (benchmark.size() != w.size()) return;
+    const Vector active = w - benchmark;
+
+    const double te_var = active.dot(sigma * active);
+    metrics.tracking_error = std::sqrt(std::max(0.0, te_var));
+
+    const double active_ret = active.dot(mu);
+    metrics.information_ratio = (metrics.tracking_error > 1e-12)
+        ? active_ret / metrics.tracking_error
+        : std::numeric_limits<double>::quiet_NaN();
+
+    metrics.active_share = 0.5 * active.cwiseAbs().sum();
+
+    // Beta to benchmark: cov(w'r, b'r) / var(b'r) = w'Σb / b'Σb
+    const double bm_var = benchmark.dot(sigma * benchmark);
+    metrics.beta_to_benchmark = (bm_var > 1e-12)
+        ? w.dot(sigma * benchmark) / bm_var
+        : std::numeric_limits<double>::quiet_NaN();
+
+    (void)risk_free_rate;
 }
 
 // ── Core single-λ solve ───────────────────────────────────────────────────────
@@ -54,14 +152,24 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
         cons = PortfolioConstraints::longOnly(n);
     cons.validate(n);
 
-    // QP: min  w'Σw - λ μ'w  ≡  min  0.5 w'(2Σ)w + (-λμ)'w
+    // QP: min  w'Σw - λμ'w  ≡  min  0.5 w'(2Σ)w + (-λμ)'w
     Matrix Q = 2.0 * data.covariance;
     Vector f = -risk_aversion * data.expected_returns;
 
-    solver_cfg_.budget = 1.0;
-    qp::SolverResult qp = qp::solve(Q, f,
-                                    cons.lower_bounds, cons.upper_bounds,
-                                    solver_cfg_);
+    // Turnover penalty: + κ‖w − w₀‖²  →  Q += 2κI,  f += -2κ w₀
+    if (cons.turnover_penalty > 0.0 && cons.current_weights.size() == n) {
+        const double k2 = 2.0 * cons.turnover_penalty;
+        Q.diagonal().array() += k2;
+        f.noalias() -= k2 * cons.current_weights;
+    }
+
+    solver_cfg_.budget = cons.budget;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    qp::SolverResult qp = qp::solveWithGroups(
+        Q, f, cons.lower_bounds, cons.upper_bounds,
+        cons.groups, params_.group_penalty, solver_cfg_);
+    const auto t1 = std::chrono::steady_clock::now();
 
     OptimizationResult result;
     result.weights    = qp.x;
@@ -69,9 +177,33 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
     result.converged  = qp.converged;
     result.iterations = qp.iterations;
     result.method     = "MVO";
-    result.metrics    = computeMetrics(qp.x,
-                                       data.expected_returns,
-                                       data.covariance);
+    result.solve_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    result.gradient_at_optimum = qp.gradient;
+
+    const double rf = data.risk_free_rate + params_.risk_free_rate;
+    result.metrics = computeMetrics(qp.x, data.expected_returns,
+                                    data.covariance, rf);
+
+    // Turnover diagnostic
+    if (cons.current_weights.size() == n) {
+        result.metrics.turnover = 0.5 * (qp.x - cons.current_weights).cwiseAbs().sum();
+    }
+
+    // Benchmark-relative metrics
+    if (data.benchmark_weights.has_value() &&
+        data.benchmark_weights->size() == n) {
+        augmentBenchmarkMetrics(result.metrics, qp.x, data.expected_returns,
+                                data.covariance, *data.benchmark_weights, rf);
+    }
+
+    // Active constraints (within 1e-6 of bound)
+    for (int i = 0; i < n; ++i) {
+        if (std::abs(qp.x[i] - cons.lower_bounds[i]) < 1e-6)
+            result.active_lower_bounds.push_back(i);
+        if (std::abs(qp.x[i] - cons.upper_bounds[i]) < 1e-6)
+            result.active_upper_bounds.push_back(i);
+    }
+
     if (!qp.converged)
         result.status_message = "Solver did not converge; result may be approximate";
 
@@ -102,18 +234,31 @@ EfficientFrontier MVOptimizer::efficientFrontier(const MarketData& data) {
     const double lo    = params_.min_risk_aversion;
     const double hi    = params_.max_risk_aversion;
 
+    if (pts <= 0)
+        throw std::invalid_argument("efficientFrontier: frontier_points must be > 0");
+    if (lo <= 0.0)
+        throw std::invalid_argument(
+            "efficientFrontier: min_risk_aversion must be > 0 (got " +
+            std::to_string(lo) + ")");
+    if (hi <= lo)
+        throw std::invalid_argument(
+            "efficientFrontier: max_risk_aversion (" + std::to_string(hi) +
+            ") must be > min_risk_aversion (" + std::to_string(lo) + ")");
+
     log::info("MVO efficient frontier: n={} assets, {} points, lambda=[{:.3f},{:.3f}]",
               n, pts, lo, hi);
 
     EfficientFrontier frontier;
     frontier.assets = data.assets;
     frontier.method = "MVO";
-    frontier.points.reserve(pts);
+    frontier.points.reserve(static_cast<std::size_t>(pts));
 
     // Logarithmic sweep: more resolution at low-risk end
     for (int i = 0; i < pts; ++i) {
-        double t      = static_cast<double>(i) / std::max(pts - 1, 1);
-        double lambda = lo * std::pow(hi / lo, t);
+        const double t = (pts == 1) ? 0.0
+                                     : static_cast<double>(i) /
+                                       static_cast<double>(pts - 1);
+        const double lambda = lo * std::pow(hi / lo, t);
 
         auto r = optimizeFor(data, lambda);
 
@@ -122,14 +267,171 @@ EfficientFrontier MVOptimizer::efficientFrontier(const MarketData& data) {
         pt.weights       = r.weights;
         pt.metrics       = r.metrics;
         frontier.points.push_back(std::move(pt));
-
-        log::debug("Frontier pt {}/{}: lambda={:.3f} ret={:.4f} vol={:.4f}",
-                   i + 1, pts, lambda,
-                   frontier.points.back().metrics.expected_return,
-                   frontier.points.back().metrics.volatility);
     }
 
     return frontier;
+}
+
+// ── PM-friendly portfolio constructors ───────────────────────────────────────
+
+OptimizationResult MVOptimizer::minVariancePortfolio(const MarketData& data) {
+    validateData(data);
+    // λ very small → variance dominates the objective
+    auto r = optimizeFor(data, 1e-6);
+    r.status_message = "Minimum-variance portfolio (λ → 0)";
+    return r;
+}
+
+OptimizationResult MVOptimizer::maxSharpePortfolio(const MarketData& data) {
+    validateData(data);
+
+    // Sweep λ and pick the highest-Sharpe point, refine via golden-section.
+    // This is robust to non-convex behaviour of Sharpe vs λ that arises
+    // when bounds are tight.
+    const double rf = data.risk_free_rate + params_.risk_free_rate;
+
+    auto sharpe_at = [&](double lam) {
+        auto r = optimizeFor(data, lam);
+        if (r.metrics.volatility < 1e-12) return -1e30;
+        return (r.metrics.expected_return - rf) / r.metrics.volatility;
+    };
+
+    // Coarse scan
+    const int N = 25;
+    const double lo = std::max(params_.min_risk_aversion, 1e-3);
+    const double hi = std::max(params_.max_risk_aversion, lo * 100.0);
+    double best_lam = lo;
+    double best_sh  = -1e30;
+    for (int i = 0; i < N; ++i) {
+        const double t = static_cast<double>(i) / static_cast<double>(N - 1);
+        const double lam = lo * std::pow(hi / lo, t);
+        const double sh = sharpe_at(lam);
+        if (sh > best_sh) { best_sh = sh; best_lam = lam; }
+    }
+
+    // Golden-section refine in log-λ around best
+    const double phi = 0.6180339887498949;
+    double a = std::log(best_lam) - std::log(hi / lo) / static_cast<double>(N - 1);
+    double b = std::log(best_lam) + std::log(hi / lo) / static_cast<double>(N - 1);
+    a = std::max(a, std::log(lo));
+    b = std::min(b, std::log(hi));
+    double c = b - phi * (b - a);
+    double d = a + phi * (b - a);
+    double fc = sharpe_at(std::exp(c));
+    double fd = sharpe_at(std::exp(d));
+    for (int iter = 0; iter < 25; ++iter) {
+        if (fc > fd) {
+            b = d; d = c; fd = fc;
+            c = b - phi * (b - a);
+            fc = sharpe_at(std::exp(c));
+        } else {
+            a = c; c = d; fc = fd;
+            d = a + phi * (b - a);
+            fd = sharpe_at(std::exp(d));
+        }
+        if (std::abs(b - a) < 1e-4) break;
+    }
+    const double lam_opt = std::exp(0.5 * (a + b));
+    auto r = optimizeFor(data, lam_opt);
+    r.status_message = "Maximum-Sharpe (tangency) portfolio";
+    return r;
+}
+
+OptimizationResult MVOptimizer::optimizeForTargetVolatility(const MarketData& data,
+                                                            double target_volatility) {
+    validateData(data);
+    if (target_volatility <= 0.0)
+        throw std::invalid_argument("target_volatility must be > 0");
+
+    // Volatility is monotone non-increasing in λ (higher λ ⇒ lower vol).
+    // Binary search in log-λ.
+    const double lo_lam = std::max(params_.min_risk_aversion, 1e-4);
+    const double hi_lam = std::max(params_.max_risk_aversion, lo_lam * 1e4);
+
+    auto vol_at = [&](double lam) {
+        return optimizeFor(data, lam).metrics.volatility;
+    };
+
+    const double v_lo = vol_at(lo_lam);
+    const double v_hi = vol_at(hi_lam);
+
+    if (target_volatility >= v_lo) {
+        auto r = optimizeFor(data, lo_lam);
+        r.status_message =
+            "Target volatility (" + std::to_string(target_volatility) +
+            ") exceeds max achievable; returning λ_min portfolio";
+        return r;
+    }
+    if (target_volatility <= v_hi) {
+        auto r = optimizeFor(data, hi_lam);
+        r.status_message =
+            "Target volatility (" + std::to_string(target_volatility) +
+            ") below min achievable; returning λ_max portfolio";
+        return r;
+    }
+
+    double log_lo = std::log(lo_lam), log_hi = std::log(hi_lam);
+    for (int iter = 0; iter < 60; ++iter) {
+        const double log_mid = 0.5 * (log_lo + log_hi);
+        const double v_mid = vol_at(std::exp(log_mid));
+        if (std::abs(v_mid - target_volatility) < 1e-5) {
+            auto r = optimizeFor(data, std::exp(log_mid));
+            r.status_message = "Target-volatility portfolio";
+            return r;
+        }
+        if (v_mid > target_volatility) log_lo = log_mid; // need more risk-aversion
+        else                            log_hi = log_mid;
+    }
+    auto r = optimizeFor(data, std::exp(0.5 * (log_lo + log_hi)));
+    r.status_message = "Target-volatility portfolio (approximate)";
+    return r;
+}
+
+OptimizationResult MVOptimizer::optimizeForTargetReturn(const MarketData& data,
+                                                        double target_return) {
+    validateData(data);
+    const double lo_lam = std::max(params_.min_risk_aversion, 1e-4);
+    const double hi_lam = std::max(params_.max_risk_aversion, lo_lam * 1e4);
+
+    auto ret_at = [&](double lam) {
+        return optimizeFor(data, lam).metrics.expected_return;
+    };
+
+    // Return is monotone non-decreasing in λ⁻¹ (higher λ ⇒ lower return typically).
+    // Search in log-λ.
+    const double r_lo = ret_at(lo_lam); // high return
+    const double r_hi = ret_at(hi_lam); // low return
+
+    if (target_return >= r_lo) {
+        auto r = optimizeFor(data, lo_lam);
+        r.status_message =
+            "Target return (" + std::to_string(target_return) +
+            ") exceeds max achievable; returning λ_min portfolio";
+        return r;
+    }
+    if (target_return <= r_hi) {
+        auto r = optimizeFor(data, hi_lam);
+        r.status_message =
+            "Target return (" + std::to_string(target_return) +
+            ") below min achievable; returning λ_max portfolio";
+        return r;
+    }
+
+    double log_lo = std::log(lo_lam), log_hi = std::log(hi_lam);
+    for (int iter = 0; iter < 60; ++iter) {
+        const double log_mid = 0.5 * (log_lo + log_hi);
+        const double r_mid = ret_at(std::exp(log_mid));
+        if (std::abs(r_mid - target_return) < 1e-6) {
+            auto r = optimizeFor(data, std::exp(log_mid));
+            r.status_message = "Target-return portfolio";
+            return r;
+        }
+        if (r_mid < target_return) log_hi = log_mid; // decrease λ for higher return
+        else                        log_lo = log_mid;
+    }
+    auto r = optimizeFor(data, std::exp(0.5 * (log_lo + log_hi)));
+    r.status_message = "Target-return portfolio (approximate)";
+    return r;
 }
 
 } // namespace portopt

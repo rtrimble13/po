@@ -68,19 +68,23 @@ bl_params = portopt.BlackLittermanParameters()
 bl_params.tau           = 0.05   # uncertainty scaling of prior
 bl_params.risk_aversion = 2.5    # market risk aversion (δ)
 
+# Idzorek mode: confidence ∈ [0, 1] is a percentage rather than a variance.
+# This is more intuitive for portfolio managers — 0.5 = "50% confident".
+bl_params.confidence_mode = portopt.ViewConfidenceMode.Idzorek
+
 # View 1: US Equities will outperform European Equities by 3%
 v1 = portopt.View()
 v1.description     = "US Equities outperform European Equities by 3%"
-v1.pick_vector     = np.array([1.0, -1.0, 0.0, 0.0, 0.0])  # relative view
+v1.pick_vector     = np.array([1.0, -1.0, 0.0, 0.0, 0.0])
 v1.expected_return = 0.03
-v1.confidence      = 0.0008   # lower = more confident
+v1.confidence      = 0.65   # 65% confident in this relative view
 
 # View 2: Bonds will return 4.5% (absolute view)
 v2 = portopt.View()
 v2.description     = "Government Bonds absolute return 4.5%"
 v2.pick_vector     = np.array([0.0, 0.0, 0.0, 1.0, 0.0])
 v2.expected_return = 0.045
-v2.confidence      = 0.0005
+v2.confidence      = 0.75   # 75% confident
 
 bl_params.views = [v1, v2]
 

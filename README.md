@@ -6,14 +6,18 @@ A high-performance C++ library for portfolio optimisation, with Python bindings,
 
 | Feature | Detail |
 |---|---|
-| **Algorithms** | Mean-Variance Optimisation (MVO) and Black-Litterman |
+| **Core algorithms** | MVO, Black-Litterman (variance- and Idzorek-mode confidences) |
+| **PM-friendly portfolios** | Min-variance, max-Sharpe, target-volatility, target-return |
+| **Constraints** | Box bounds, budget (incl. dollar-neutral & 130/30), fix/forbid assets, group caps, L2 turnover penalty |
+| **Estimation** | Sample / Ledoit-Wolf / OAS / linear shrinkage from returns CSV |
+| **Metrics** | Sharpe (rf-aware), risk contributions, diversification ratio, effective N, tracking error, IR, active share, beta, turnover |
 | **Language** | C++17 library; Python bindings via pybind11 |
-| **CLI** | Cross-platform binary for Linux and Windows |
-| **Input formats** | JSON, CSV (market data); JSON, TOML (parameters) |
-| **Output formats** | Console (formatted table), JSON, CSV |
+| **CLI** | Cross-platform binary; ASCII-fallback console for Windows |
+| **Input formats** | JSON / CSV (market data); JSON / TOML (parameters); returns CSV |
+| **Output formats** | Console table, JSON, CSV; notional $ exposure; "explain" mode for active bounds |
 | **Logging** | spdlog-backed, configurable level + rotating file sink |
 | **Diagnostics** | Jupyter notebook template with automatic report generation |
-| **Tests** | Catch2 test suite (QP solver, MVO, BL, IO, integration) |
+| **Tests** | Catch2 test suite (QP solver, MVO, BL, estimation, IO, integration) |
 
 ## Quick start
 
@@ -52,11 +56,30 @@ python -c "import portopt; print(portopt.__version__)"
 portopt <subcommand> [options]
 
 Subcommands:
-  mvo          Single MVO-optimal portfolio
-  frontier     MVO efficient frontier
-  bl           Black-Litterman optimal portfolio
-  bl-frontier  Black-Litterman efficient frontier
-  report       Generate Jupyter diagnostic report
+  mvo            Single MVO-optimal portfolio
+  frontier       MVO efficient frontier
+  bl             Black-Litterman optimal portfolio
+  bl-frontier    Black-Litterman efficient frontier
+  min-variance   Minimum-variance portfolio
+  max-sharpe     Maximum-Sharpe (tangency) portfolio
+  target-vol     Portfolio with a target volatility (e.g. --target 0.15)
+  target-return  Portfolio with a target expected return
+  report         Generate Jupyter diagnostic report
+
+Common flags (most subcommands):
+  --returns                 Treat -d as a returns time-series CSV
+  --periods-per-year N      Annualisation factor (252 daily, 12 monthly)
+  --shrinkage {none|linear|ledoit-wolf|oas}
+                            Covariance shrinkage (with --returns)
+  --shrinkage-delta D       Manual δ for --shrinkage=linear
+  --risk-aversion λ         Override λ from params
+  --risk-free-rate rf       Risk-free rate used in Sharpe
+  --budget B                Sum-of-weights (1.0=fully invested, 0.0=long/short)
+  --turnover-penalty κ      L2 penalty on |w − current_weights|²
+  --total-capital $X        Print notional dollar exposure
+  --explain                 Print active constraints
+  --ascii                   Use ASCII separators in console output (Windows-friendly)
+  --show-zero               Include near-zero weights in output
 ```
 
 ### Examples
@@ -74,14 +97,22 @@ portopt frontier -d assets.json -p params.json -o frontier.csv
 # Black-Litterman with model diagnostics
 portopt bl -d assets.json -p params.toml --show-model -o bl_result.json
 
-# BL efficient frontier
-portopt bl-frontier -d assets.json -p params.toml -o bl_frontier.csv
+# PM-friendly: minimum-variance / max-Sharpe / 15% target vol
+portopt min-variance -d assets.json
+portopt max-sharpe   -d assets.json --risk-free-rate 0.04
+portopt target-vol   -d assets.json --target 0.15
+
+# Daily returns → MVO with Ledoit-Wolf shrinkage
+portopt mvo -d daily_returns.csv --returns --shrinkage ledoit-wolf
+
+# Show dollar notionals on a $10M book, with active constraints explained
+portopt mvo -d assets.json --total-capital 10000000 --explain
+
+# Windows console: use ASCII separators
+portopt mvo -d assets.json --ascii
 
 # Jupyter diagnostic report
 portopt report -d assets.json -p params.toml -o reports/
-
-# Control log level
-portopt mvo -d assets.json --log-level debug --log-file portopt.log
 ```
 
 ## Python usage
@@ -91,36 +122,60 @@ import portopt
 
 portopt.init_logging(portopt.LogLevel.Info)
 
-# Load data
+# Load data — sets benchmark_weights and risk_free_rate if present in JSON
 data = portopt.read_market_data("assets.json")
 
-# MVO
+# MVO with budget, turnover penalty, and per-asset caps
 params = portopt.MVOParameters()
 params.risk_aversion = 2.5
-params.constraints   = portopt.PortfolioConstraints.long_only(len(data.assets))
+params.risk_free_rate = 0.04
+params.constraints = portopt.PortfolioConstraints.long_only(len(data.assets))
+params.constraints.upper_bounds[:] = 0.35
+params.constraints.current_weights = [0.2, 0.2, 0.2, 0.2, 0.2]
+params.constraints.turnover_penalty = 0.5
 
-opt      = portopt.MVOptimizer(params)
-result   = opt.optimize(data)
-frontier = opt.efficient_frontier(data)
+opt = portopt.MVOptimizer(params)
 
-print(f"Sharpe: {result.metrics.sharpe_ratio:.3f}")
-df = frontier.to_dataframe()  # pandas DataFrame
+# PM-friendly portfolio constructors
+mv      = opt.min_variance_portfolio(data)
+ms      = opt.max_sharpe_portfolio(data)
+tgt_vol = opt.optimize_for_target_volatility(data, 0.15)
+tgt_ret = opt.optimize_for_target_return(data, 0.10)
 
-# Black-Litterman
+result = opt.optimize(data)
+print(f"Sharpe (rf-adjusted):    {result.metrics.sharpe_ratio:.3f}")
+print(f"Tracking error vs B/M:   {result.metrics.tracking_error * 100:.2f}%")
+print(f"Information ratio:       {result.metrics.information_ratio:.3f}")
+print(f"Active share:            {result.metrics.active_share * 100:.2f}%")
+print(f"Risk contributions:      {list(result.metrics.risk_contribution)}")
+
+# Black-Litterman with Idzorek-style confidence
 bl_params = portopt.BlackLittermanParameters()
 bl_params.tau = 0.05
+bl_params.risk_aversion = 2.5
+bl_params.confidence_mode = portopt.ViewConfidenceMode.Idzorek
 v = portopt.View()
 v.pick_vector     = [1.0, -1.0, 0.0]
 v.expected_return = 0.03
-v.confidence      = 0.001
+v.confidence      = 0.65   # 65% confident
 bl_params.views   = [v]
 
 bl     = portopt.BlackLittermanOptimizer(bl_params)
 bl_res = bl.optimize(data)
-model  = bl.model_output(data)   # inspect prior vs. posterior returns
+model  = bl.model_output(data)
+
+# Build MarketData from a returns time series with shrinkage
+import numpy as np
+R = np.random.randn(252, 5) * 0.01
+data2 = portopt.estimation.from_returns(
+    ["A", "B", "C", "D", "E"], R, periods_per_year=252,
+    shrinkage="ledoit-wolf",
+)
 ```
 
-See `examples/example_mvo.py` and `examples/example_bl.py` for complete walkthroughs.
+See `examples/example_mvo.py`, `examples/example_bl.py`,
+`examples/example_from_json.py`, and `examples/example_from_returns.py`
+for complete walkthroughs.
 
 ## Input file formats
 
@@ -129,10 +184,13 @@ See `examples/example_mvo.py` and `examples/example_bl.py` for complete walkthro
 ```json
 {
   "assets": [
-    { "ticker": "AAPL", "name": "Apple", "expected_return": 0.15, "market_cap": 2.8e12 }
+    { "ticker": "AAPL", "name": "Apple",
+      "expected_return": 0.15, "market_cap": 2.8e12, "sector": "Tech" }
   ],
-  "covariance": [[0.04]],
-  "market_weights": [1.0]
+  "covariance":        [[0.04]],
+  "market_weights":    [1.0],
+  "benchmark_weights": [1.0],
+  "risk_free_rate":    0.04
 }
 ```
 
@@ -160,20 +218,30 @@ MSFT,0.0224,0.0441
   "mvo": {
     "risk_aversion": 2.5,
     "frontier_points": 50,
+    "risk_free_rate": 0.04,
     "constraints": {
       "lower_bounds": [0.0, 0.0],
-      "upper_bounds": [0.4, 0.4]
+      "upper_bounds": [0.4, 0.4],
+      "budget": 1.0,
+      "turnover_penalty": 0.0,
+      "current_weights": [0.5, 0.5],
+      "groups": [
+        { "description": "Tech ≤ 30%",
+          "coefficients": [1.0, 0.0],
+          "lower": 0.0, "upper": 0.3 }
+      ]
     }
   },
   "black_litterman": {
     "tau": 0.05,
     "risk_aversion": 2.5,
+    "confidence_mode": "idzorek",
     "views": [
       {
         "description": "Asset A outperforms B",
         "pick_vector": [1.0, -1.0],
         "expected_return": 0.03,
-        "confidence": 0.001
+        "confidence": 0.65
       }
     ]
   }

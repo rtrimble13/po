@@ -58,16 +58,22 @@ for a, w in zip(result.assets, result.weights):
     if abs(w) > 1e-4:
         print(f"  {a.ticker:12s} {w:.4f}  ({w*100:.1f}%)")
 
-# ── 5. Efficient frontier ─────────────────────────────────────────────────────
+# ── 5. Efficient frontier + PM-friendly targets ──────────────────────────────
 frontier = opt.efficient_frontier(data)
 print(f"\nEfficient frontier: {len(frontier.points)} points")
 
-# Find max-Sharpe portfolio
-best = max(frontier.points, key=lambda p: p.metrics.sharpe_ratio)
-print(f"Max-Sharpe point: λ={best.risk_aversion:.2f}  "
-      f"ret={best.metrics.expected_return*100:.2f}%  "
-      f"vol={best.metrics.volatility*100:.2f}%  "
-      f"Sharpe={best.metrics.sharpe_ratio:.3f}")
+# Use the dedicated helper rather than scanning the frontier:
+max_sharpe = opt.max_sharpe_portfolio(data)
+min_var    = opt.min_variance_portfolio(data)
+target_vol = opt.optimize_for_target_volatility(data, 0.15)
+
+print(f"Max-Sharpe portfolio: ret={max_sharpe.metrics.expected_return*100:.2f}%  "
+      f"vol={max_sharpe.metrics.volatility*100:.2f}%  "
+      f"Sharpe={max_sharpe.metrics.sharpe_ratio:.3f}")
+print(f"Min-variance:         ret={min_var.metrics.expected_return*100:.2f}%  "
+      f"vol={min_var.metrics.volatility*100:.2f}%")
+print(f"Target 15% vol:       ret={target_vol.metrics.expected_return*100:.2f}%  "
+      f"vol={target_vol.metrics.volatility*100:.2f}%")
 
 # ── 6. Write results ──────────────────────────────────────────────────────────
 json_out = portopt.result_to_json(result)

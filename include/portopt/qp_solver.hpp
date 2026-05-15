@@ -12,6 +12,10 @@
  * Method: Nesterov-accelerated projected gradient descent.
  * Projection onto the generalised simplex with box constraints is performed
  * in O(n log n) via bisection on the dual Lagrange multiplier.
+ *
+ * Group inequality constraints  lo_g ≤ a_g' x ≤ hi_g  are supported via a soft
+ * penalty term (quadratic on violation magnitude). Set @p group_penalty to 0
+ * to disable; larger values enforce more strictly.
  */
 
 #include "types.hpp"
@@ -25,6 +29,7 @@ struct SolverConfig {
     double tolerance{1e-9};        ///< Primal / dual residual convergence tol
     double budget{1.0};            ///< Budget constraint (sum of weights)
     bool   use_nesterov{true};     ///< Enable momentum acceleration
+    Vector warm_start;             ///< Optional warm-start (empty = equal-weight)
 };
 
 /// Raw result from the QP solver.
@@ -34,6 +39,7 @@ struct SolverResult {
     int    iterations{0};
     bool   converged{false};
     double primal_residual{0.0};   ///< ||x_{k+1} - x_k||
+    Vector gradient;               ///< ∇f(x*) = Qx* + f
 };
 
 /**
@@ -65,6 +71,22 @@ SolverResult solve(const Matrix&       Q,
                    const Vector&       lb,
                    const Vector&       ub,
                    const SolverConfig& cfg = {});
+
+/**
+ * @brief Solve the box-simplex QP with optional group inequality constraints.
+ *
+ * Group constraints are enforced via a quadratic penalty on violation:
+ *   min  ... + 0.5 * group_penalty * Σ_g [max(0, a_g'x - hi_g)² + max(0, lo_g - a_g'x)²]
+ *
+ * For hard enforcement, set @p group_penalty large (e.g. 1e6) or omit the group.
+ */
+SolverResult solveWithGroups(const Matrix&                        Q,
+                             const Vector&                        f,
+                             const Vector&                        lb,
+                             const Vector&                        ub,
+                             const std::vector<GroupConstraint>&  groups,
+                             double                               group_penalty,
+                             const SolverConfig&                  cfg = {});
 
 /**
  * @brief Compute the largest eigenvalue of @p M via power iteration.

@@ -3,6 +3,7 @@ add_library(portopt_lib STATIC
     qp_solver.cpp
     mvo.cpp
     black_litterman.cpp
+    estimation.cpp
     io/reader.cpp
     io/writer.cpp
 )

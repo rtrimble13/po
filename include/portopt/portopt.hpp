@@ -28,6 +28,7 @@
 #include "qp_solver.hpp"
 #include "mvo.hpp"
 #include "black_litterman.hpp"
+#include "estimation.hpp"
 #include "io/reader.hpp"
 #include "io/writer.hpp"
 #include "logging.hpp"

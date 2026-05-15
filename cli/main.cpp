@@ -562,7 +562,7 @@ int main(int argc, char* argv[]) {
     makeDataOpt(ms_cmd, ms_o.data); makeParamsOpt(ms_cmd, ms_o.params);
     makeOutputOpts(ms_cmd, ms_o.out); makeReturnsOpts(ms_cmd, ms_o);
     ms_cmd->add_option("--risk-free-rate", ms_o.risk_free_rate,
-                        "Risk-free rate for Sharpe denominator");
+                        "Risk-free rate for Sharpe calculation");
 
     // ── target-vol ────────────────────────────────────────────────────────────
     auto* tv_cmd = app.add_subcommand("target-vol",

@@ -453,6 +453,19 @@ PYBIND11_MODULE(_portopt, m) {
            py::arg("n_resamples")   = 100,
            py::arg("seed")          = 42u,
            "Resampled (Michaud) MVO via bootstrap averaging.");
+    pf.def("minimum_cvar", &portfolios::minimumCVaR,
+           py::arg("returns"), py::arg("alpha") = 0.95,
+           py::arg("lower_bounds") = Vector(),
+           py::arg("upper_bounds") = Vector(),
+           py::arg("budget") = 1.0,
+           py::arg("ridge")  = -1.0,
+           py::arg("max_iters") = 50,
+           "Minimum-CVaR portfolio (Rockafellar-Uryasev) over a sample "
+           "return matrix.");
+    pf.def("realised_cvar", &portfolios::realisedCVaR,
+           py::arg("returns"), py::arg("weights"),
+           py::arg("alpha") = 0.95,
+           "Realised CVaR_α of a portfolio against a sample return history.");
 
     // ── Factor risk model (B7 / B8) ───────────────────────────────────────────
     py::class_<FactorRiskModel>(m, "FactorRiskModel")

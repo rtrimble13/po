@@ -99,5 +99,48 @@ Vector resampledMVO(const Vector& mu,
                      int    n_resamples   = 100,
                      unsigned seed        = 42);
 
+/**
+ * @brief Minimum-CVaR portfolio (B5) — Rockafellar-Uryasev (2000).
+ *
+ * Solves, over the sample returns matrix R (T × n):
+ *
+ *     min_{w, ξ}   ξ + (1 / (T·(1−α))) · Σ_t max(0, −r_t'w − ξ)
+ *     s.t.         1'w = 1, lb ≤ w ≤ ub
+ *
+ * @p alpha is the confidence level (typical 0.95 or 0.99). The classical
+ * formulation is an LP; we solve it via a smoothed-hinge subgradient
+ * loop that reuses the existing FISTA QP solver. Each outer iteration
+ * fixes the threshold ξ to the empirical α-quantile of the current
+ * portfolio's losses and applies a ridge-regularised QP whose linear
+ * objective coincides with the CVaR gradient at the current iterate.
+ * Long-only by default; pass alternate bounds for L/S.
+ *
+ * @param returns       T × n historical return matrix (one row per period).
+ * @param alpha         Tail-confidence ∈ (0,1).
+ * @param lower_bounds  Per-asset weight lower bound (size n, default 0).
+ * @param upper_bounds  Per-asset weight upper bound (size n, default 1).
+ * @param budget        Sum of weights (default 1).
+ * @param ridge         Tiny ℓ₂ regulariser on w' Σ w to keep the inner QP
+ *                      well-posed (default 1e-4 · trace(Σ)/n).
+ * @param max_iters     Outer-iteration cap.
+ * @return              Optimal weights summing to @p budget.
+ */
+Vector minimumCVaR(const Matrix& returns,
+                    double alpha = 0.95,
+                    Vector lower_bounds = Vector(),
+                    Vector upper_bounds = Vector(),
+                    double budget = 1.0,
+                    double ridge = -1.0,
+                    int    max_iters = 50);
+
+/**
+ * @brief Realised CVaR of a portfolio against a sample return history.
+ *
+ * CVaR_α(L) = E[L | L ≥ VaR_α], with L = −r_t'w.
+ */
+double realisedCVaR(const Matrix& returns,
+                     const Vector& weights,
+                     double alpha = 0.95);
+
 } // namespace portfolios
 } // namespace portopt

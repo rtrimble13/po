@@ -6,6 +6,8 @@
 #include <catch2/catch_all.hpp>
 #include <portopt/portfolios.hpp>
 
+#include <random>
+
 using namespace portopt;
 using namespace portopt::portfolios;
 using Catch::Approx;
@@ -180,4 +182,49 @@ TEST_CASE("resampledMVO returns valid long-only weights",
     REQUIRE(w.size() == 3);
     CHECK(w.sum() == Approx(1.0).margin(1e-9));
     for (int i = 0; i < 3; ++i) CHECK(w[i] >= 0.0);
+}
+
+// ── B5: Minimum-CVaR ─────────────────────────────────────────────────────────
+
+TEST_CASE("realisedCVaR matches manual tail mean", "[portfolios][cvar][b5]") {
+    Matrix R(10, 2);
+    R <<  0.02,  0.03,
+          0.01,  0.02,
+          0.00,  0.01,
+         -0.01,  0.00,
+         -0.02, -0.01,
+         -0.05, -0.04,
+          0.04,  0.05,
+          0.03,  0.04,
+          0.05,  0.06,
+         -0.10, -0.08;
+    Vector w(2); w << 0.5, 0.5;
+
+    // L = -r_t'w; sorted ascending in losses, tail 90% = top 10% of loss.
+    // T=10, alpha=0.9, cut_idx = 9 (worst), so CVaR = max loss only.
+    const double c = realisedCVaR(R, w, 0.9);
+    const double worst_loss = -(R.row(9) * w).value();
+    CHECK(c == Approx(worst_loss).margin(1e-12));
+}
+
+TEST_CASE("minimumCVaR returns budget-respecting long-only weights",
+          "[portfolios][cvar][b5]") {
+    Matrix R(200, 3);
+    std::mt19937 rng(7);
+    std::normal_distribution<double> nd(0.0, 0.02);
+    std::normal_distribution<double> hd(0.0, 0.04);
+    for (int t = 0; t < 200; ++t) {
+        R(t, 0) = nd(rng);
+        R(t, 1) = nd(rng);
+        R(t, 2) = hd(rng);    // riskier
+    }
+    auto w = minimumCVaR(R, 0.95);
+    REQUIRE(w.size() == 3);
+    CHECK(w.sum() == Approx(1.0).margin(1e-3));
+    for (int i = 0; i < 3; ++i) {
+        CHECK(w[i] >= -1e-9);
+        CHECK(w[i] <= 1.0 + 1e-9);
+    }
+    // Riskier asset (3rd) should have small weight in min-CVaR.
+    CHECK(w[2] < std::max(w[0], w[1]));
 }

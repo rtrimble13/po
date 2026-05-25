@@ -1,9 +1,11 @@
 #include <portopt/portfolios.hpp>
 #include <portopt/logging.hpp>
 #include <portopt/mvo.hpp>
+#include <portopt/qp_solver.hpp>
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -356,6 +358,138 @@ Vector resampledMVO(const Vector& mu,
     Vector w = w_sum / static_cast<double>(success);
     const double s = w.sum();
     if (s > 0.0) w /= s;
+    return w;
+}
+
+// ── B5: minimum-CVaR portfolio (Rockafellar-Uryasev 2000) ────────────────────
+//
+// The exact CVaR LP is
+//
+//     min  ξ + (1/(T·β)) · Σ_t z_t        with β = 1 − α
+//     s.t. z_t ≥ −r_t'w − ξ,  z_t ≥ 0,  1'w = 1,  lb ≤ w ≤ ub.
+//
+// Our FISTA solver does not handle generic LPs, but the standard CVaR
+// objective is convex in w once ξ is fixed: the inner minimisation in z
+// at fixed (w, ξ) gives z_t = max(0, −r_t'w − ξ). Substituting back:
+//
+//     f(w; ξ) = ξ + (1/(T·β)) · Σ_t max(0, −r_t'w − ξ).
+//
+// This is piecewise-linear in w. We minimise it by a subgradient-style
+// outer loop that (a) fixes ξ to the empirical α-quantile of L_t = −r_t'w,
+// then (b) solves a ridge-regularised LP-as-QP:
+//
+//     min  0.5 ridge · w'I w  +  (1/(T·β)) · Σ_{t ∈ tail(w)} (−r_t)'w
+//     s.t. 1'w = budget,  lb ≤ w ≤ ub
+//
+// where tail(w) = { t : −r_t'w > ξ } is the index set of tail losses at
+// the current iterate. The ridge term makes the inner problem strictly
+// convex so FISTA converges; ridge → 0 recovers the LP exactly. Iterate
+// until tail(w) and ξ stabilise.
+
+double realisedCVaR(const Matrix& returns,
+                     const Vector& weights,
+                     double alpha) {
+    if (alpha <= 0.0 || alpha >= 1.0)
+        throw std::invalid_argument(
+            "realisedCVaR: alpha must be strictly between 0 and 1");
+    const int T = static_cast<int>(returns.rows());
+    if (T <= 1)
+        throw std::invalid_argument(
+            "realisedCVaR: need at least 2 sample periods");
+    if (returns.cols() != weights.size())
+        throw std::invalid_argument(
+            "realisedCVaR: returns / weights size mismatch");
+    Vector L = -(returns * weights);                  // losses per period
+    std::vector<double> losses(L.data(), L.data() + T);
+    std::sort(losses.begin(), losses.end());
+    const int cut_idx = static_cast<int>(std::floor(alpha * T));
+    if (cut_idx >= T) return losses.back();
+    double sum = 0.0;
+    int    cnt = 0;
+    for (int t = cut_idx; t < T; ++t) { sum += losses[t]; ++cnt; }
+    return cnt > 0 ? sum / cnt : losses.back();
+}
+
+Vector minimumCVaR(const Matrix& returns,
+                    double alpha,
+                    Vector lower_bounds,
+                    Vector upper_bounds,
+                    double budget,
+                    double ridge,
+                    int    max_iters) {
+    if (alpha <= 0.0 || alpha >= 1.0)
+        throw std::invalid_argument(
+            "minimumCVaR: alpha must be strictly between 0 and 1");
+    const int T = static_cast<int>(returns.rows());
+    const int n = static_cast<int>(returns.cols());
+    if (T < 2)
+        throw std::invalid_argument(
+            "minimumCVaR: need at least 2 sample periods");
+
+    if (lower_bounds.size() != n) lower_bounds = Vector::Zero(n);
+    if (upper_bounds.size() != n) upper_bounds = Vector::Ones(n);
+    if ((lower_bounds.array() > upper_bounds.array()).any())
+        throw std::invalid_argument(
+            "minimumCVaR: lower_bounds must be ≤ upper_bounds element-wise");
+
+    // Sample covariance (used as the ridge regulariser pattern, not the
+    // objective). Using diagonal of Σ gives a per-asset variance ridge
+    // that is both scale-invariant and PSD.
+    const Vector mu  = returns.colwise().mean().transpose();
+    const Matrix X   = returns.rowwise() - mu.transpose();
+    const Matrix S   = (X.transpose() * X) /
+                       static_cast<double>(T - 1);
+    if (ridge < 0.0)
+        ridge = 1e-4 * (S.trace() / std::max(1, n));
+
+    qp::SolverConfig cfg;
+    cfg.budget         = budget;
+    cfg.tolerance      = 1e-9;
+    cfg.max_iterations = 10000;
+
+    // Start from equal-weight.
+    Vector w = Vector::Constant(n, budget / static_cast<double>(n));
+    double prev_obj = std::numeric_limits<double>::infinity();
+    const double beta = 1.0 - alpha;
+
+    for (int it = 0; it < max_iters; ++it) {
+        // Compute losses L_t = -r_t'w and identify tail at α.
+        Vector L = -(returns * w);
+        std::vector<double> sorted_L(L.data(), L.data() + T);
+        std::sort(sorted_L.begin(), sorted_L.end());
+        const int cut_idx = std::min(T - 1,
+            std::max(0, static_cast<int>(std::floor(alpha * T))));
+        const double xi = sorted_L[cut_idx];
+
+        // Linear objective contribution: f += (1/(T·β)) · Σ_{t in tail} −r_t.
+        Vector f_lin = Vector::Zero(n);
+        int    n_tail = 0;
+        for (int t = 0; t < T; ++t) {
+            if (L[t] >= xi - 1e-12) {
+                f_lin.noalias() -= returns.row(t).transpose() / (T * beta);
+                ++n_tail;
+            }
+        }
+
+        // Ridge regulariser to keep the QP strictly convex.
+        Matrix Q = 2.0 * ridge * Matrix::Identity(n, n);
+        // Also include a tiny mass on the sample covariance — biases the
+        // solver toward stable corners and dampens chattering between the
+        // tail set across iterations.
+        Q.noalias() += 2.0 * 1e-6 * S;
+        Vector f = f_lin;
+
+        auto qp_res = qp::solve(Q, f, lower_bounds, upper_bounds, cfg);
+        w = qp_res.x;
+        cfg.warm_start = w;
+
+        // CVaR objective value at the new iterate
+        const double cvar = realisedCVaR(returns, w, alpha);
+        if (std::abs(prev_obj - cvar) < 1e-7 * std::max(1.0, std::abs(cvar)))
+            break;
+        prev_obj = cvar;
+        (void)n_tail;
+    }
     return w;
 }
 

@@ -383,6 +383,37 @@ TEST_CASE("MVO with rank-1 covariance still produces a sensible portfolio",
     CHECK((r.weights.array() >= -1e-8).all());
 }
 
+// ── B16: Audit trail (version + input/params hash) ───────────────────────────
+
+TEST_CASE("OptimizationResult is stamped with library version and hashes",
+          "[mvo][audit][b16]") {
+    auto data = fiveAssets();
+    MVOParameters p;
+    p.constraints   = PortfolioConstraints::longOnly(5);
+    p.risk_aversion = 2.0;
+
+    auto r1 = MVOptimizer(p).optimize(data);
+    auto r2 = MVOptimizer(p).optimize(data);
+
+    CHECK(!r1.library_version.empty());
+    CHECK(!r1.input_hash.empty());
+    CHECK(!r1.params_hash.empty());
+    // Repeatable for identical input / params.
+    CHECK(r1.input_hash  == r2.input_hash);
+    CHECK(r1.params_hash == r2.params_hash);
+
+    // Hash changes when params change.
+    p.risk_aversion = 3.0;
+    auto r3 = MVOptimizer(p).optimize(data);
+    CHECK(r3.params_hash != r1.params_hash);
+    CHECK(r3.input_hash  == r1.input_hash);
+
+    // Hash changes when input data changes.
+    data.expected_returns[0] += 0.001;
+    auto r4 = MVOptimizer(p).optimize(data);
+    CHECK(r4.input_hash != r3.input_hash);
+}
+
 // ── A10: Tightly-binding bounds (lb = ub for several assets) ─────────────────
 
 TEST_CASE("MVO honours lb = ub (pinned positions)", "[mvo][tight_bounds]") {

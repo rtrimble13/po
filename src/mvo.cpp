@@ -1,9 +1,13 @@
 #include <portopt/mvo.hpp>
+#include <portopt/portopt.hpp>   // VERSION_STRING for audit trail
 #include <portopt/logging.hpp>
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 
 namespace portopt {
@@ -36,6 +40,68 @@ namespace tol {
     constexpr double kActiveBound  = 1e-6;   ///< |w_i − bound| < kActiveBound
     constexpr double kFeasibility  = 1e-9;   ///< budget / equality slack
     constexpr double kPSD          = 1e-6;   ///< relative eigenvalue floor on Σ
+}
+
+// ── Audit-trail hashing (B16) ────────────────────────────────────────────────
+// Stable, version-independent 64-bit FNV-1a over a canonicalised
+// stringification of inputs / params. Used to stamp every
+// OptimizationResult so two runs with identical inputs share an
+// identical hash, and any drift surfaces immediately.
+static std::string fnv1aHex(const std::string& s) {
+    std::uint64_t h = 0xcbf29ce484222325ULL;
+    for (char c : s) {
+        h ^= static_cast<std::uint8_t>(c);
+        h *= 0x100000001b3ULL;
+    }
+    char buf[20];
+    std::snprintf(buf, sizeof(buf), "%016llx",
+                  static_cast<unsigned long long>(h));
+    return std::string(buf);
+}
+
+static void writeVec(std::ostringstream& os, const Vector& v) {
+    os << '[' << v.size() << ':';
+    os.precision(16);
+    for (int i = 0; i < v.size(); ++i) os << v[i] << ',';
+    os << ']';
+}
+
+static void writeMat(std::ostringstream& os, const Matrix& M) {
+    os << '{' << M.rows() << 'x' << M.cols() << ':';
+    os.precision(16);
+    for (int i = 0; i < M.rows(); ++i)
+        for (int j = 0; j < M.cols(); ++j) os << M(i, j) << ',';
+    os << '}';
+}
+
+static std::string inputHash(const MarketData& data) {
+    std::ostringstream os;
+    writeVec(os, data.expected_returns);
+    writeMat(os, data.covariance);
+    if (data.market_weights)    { os << "mw="; writeVec(os, *data.market_weights); }
+    if (data.benchmark_weights) { os << "bm="; writeVec(os, *data.benchmark_weights); }
+    os.precision(16);
+    os << "rf=" << data.risk_free_rate;
+    return fnv1aHex(os.str());
+}
+
+static std::string paramsHash(const MVOParameters& p) {
+    std::ostringstream os;
+    os.precision(16);
+    os << "lam=" << p.risk_aversion
+       << " rf="  << p.risk_free_rate
+       << " grp_pen=" << p.group_penalty
+       << " budget=" << p.constraints.budget
+       << " kappa="  << p.constraints.turnover_penalty;
+    writeVec(os, p.constraints.lower_bounds);
+    writeVec(os, p.constraints.upper_bounds);
+    if (p.constraints.current_weights.size() > 0)
+        writeVec(os, p.constraints.current_weights);
+    for (const auto& g : p.constraints.groups) {
+        os << "[" << g.lower << ',' << g.upper << ']';
+        writeVec(os, g.coefficients);
+    }
+    return fnv1aHex(os.str());
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
@@ -205,6 +271,9 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
     result.primal_residual = qp.primal_residual;
     result.kkt_residual    = qp.kkt_residual;
     result.dual_estimate   = qp.dual_estimate;
+    result.library_version = VERSION_STRING;
+    result.input_hash      = inputHash(data);
+    result.params_hash     = paramsHash(params_);
 
     const double rf = effectiveRiskFreeRate(params_, data);
     result.metrics = computeMetrics(qp.x, data.expected_returns,

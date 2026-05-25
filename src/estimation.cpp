@@ -201,6 +201,39 @@ Matrix oasShrinkage(const Matrix& returns, double periods_per_year,
     return periods_per_year * ((1.0 - delta) * S + delta * F);
 }
 
+// ── Exponentially-weighted covariance (B14, RiskMetrics-style) ───────────────
+
+Matrix ewmaCovariance(const Matrix& returns, double lambda,
+                      double periods_per_year) {
+    const int T = static_cast<int>(returns.rows());
+    const int n = static_cast<int>(returns.cols());
+    if (T < 2)
+        throw std::invalid_argument("ewmaCovariance: need at least 2 periods");
+    if (lambda <= 0.0 || lambda >= 1.0)
+        throw std::invalid_argument("ewmaCovariance: lambda must be in (0, 1)");
+    rejectNonFinite(returns, "ewmaCovariance");
+
+    // Exponentially-weighted mean and covariance, computed in one pass
+    // newest-to-oldest so that the latest observation receives weight
+    // (1 − λ) and earlier observations decay geometrically.
+    Vector mean = Vector::Zero(n);
+    Matrix S    = Matrix::Zero(n, n);
+    double total_w = 0.0;
+    double w = 1.0 - lambda;
+    for (int t = T - 1; t >= 0; --t) {
+        const Vector r = returns.row(t).transpose();
+        mean   += w * r;
+        S      += w * (r * r.transpose());
+        total_w += w;
+        w *= lambda;
+    }
+    mean /= total_w;
+    S    /= total_w;
+    S    -= mean * mean.transpose();
+
+    return periods_per_year * S;
+}
+
 // ── MarketData factory ───────────────────────────────────────────────────────
 
 MarketData fromReturns(const std::vector<std::string>& tickers,
@@ -237,10 +270,19 @@ MarketData fromReturns(const std::vector<std::string>& tickers,
         data.covariance = ledoitWolfShrinkage(returns, periods_per_year);
     } else if (s == "oas") {
         data.covariance = oasShrinkage(returns, periods_per_year);
+    } else if (s == "ewma") {
+        // `shrinkage_delta` is repurposed as the EWMA decay λ when ewma is
+        // selected (defaults to 0.94 if the caller leaves the field at its
+        // 0.2 default — RiskMetrics' daily convention).
+        const double ewma_lambda = (shrinkage_delta > 0.0 &&
+                                    shrinkage_delta < 1.0 &&
+                                    shrinkage_delta != 0.2)
+                                       ? shrinkage_delta : 0.94;
+        data.covariance = ewmaCovariance(returns, ewma_lambda, periods_per_year);
     } else {
         throw std::invalid_argument(
             "fromReturns: unknown shrinkage \"" + shrinkage +
-            "\" (expected: none | linear | ledoit-wolf | oas)");
+            "\" (expected: none | linear | ledoit-wolf | oas | ewma)");
     }
 
     // Reflect μ back into per-asset expected_return

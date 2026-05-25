@@ -168,6 +168,9 @@ PYBIND11_MODULE(_portopt, m) {
         .def_readonly("primal_residual",      &OptimizationResult::primal_residual)
         .def_readonly("kkt_residual",         &OptimizationResult::kkt_residual)
         .def_readonly("dual_estimate",        &OptimizationResult::dual_estimate)
+        .def_readonly("library_version",      &OptimizationResult::library_version)
+        .def_readonly("input_hash",           &OptimizationResult::input_hash)
+        .def_readonly("params_hash",          &OptimizationResult::params_hash)
         .def("to_dict", [](const OptimizationResult& r) {
             py::dict d;
             d["method"]     = r.method;
@@ -194,6 +197,11 @@ PYBIND11_MODULE(_portopt, m) {
             conv["kkt_residual"]    = r.kkt_residual;
             conv["dual_estimate"]   = r.dual_estimate;
             d["convergence"] = conv;
+            py::dict aud;
+            aud["library_version"] = r.library_version;
+            aud["input_hash"]      = r.input_hash;
+            aud["params_hash"]     = r.params_hash;
+            d["audit"] = aud;
             return d;
         });
 
@@ -334,6 +342,10 @@ PYBIND11_MODULE(_portopt, m) {
             Matrix S = estimation::oasShrinkage(R, ppy, &delta);
             return py::make_tuple(S, delta);
         }, py::arg("returns"), py::arg("periods_per_year") = 1.0);
+    est.def("ewma_covariance", &estimation::ewmaCovariance,
+            py::arg("returns"), py::arg("lambda_") = 0.94,
+            py::arg("periods_per_year") = 1.0,
+            "Exponentially-weighted (RiskMetrics-style) covariance.");
     est.def("from_returns", &estimation::fromReturns,
             py::arg("tickers"), py::arg("returns"),
             py::arg("periods_per_year") = 1.0,
@@ -380,6 +392,16 @@ PYBIND11_MODULE(_portopt, m) {
           [](const BLModelOutput& bl, const std::vector<Asset>& assets, int indent) {
               return io::blModelToJSON(bl, assets, indent);
           }, py::arg("bl_model"), py::arg("assets"), py::arg("indent") = 2);
+
+    // ── Convenience portfolios (B15) ──────────────────────────────────────────
+    py::module_ pf = m.def_submodule("portfolios",
+        "Closed-form convenience portfolio constructors.");
+    pf.def("equal_weight", &portfolios::equalWeight, py::arg("n"));
+    pf.def("inverse_variance", &portfolios::inverseVariance, py::arg("covariance"));
+    pf.def("inverse_volatility", &portfolios::inverseVolatility,
+           py::arg("covariance"));
+    pf.def("market_cap_weighted", &portfolios::marketCapWeighted,
+           py::arg("assets"));
 
     // ── Version ───────────────────────────────────────────────────────────────
     m.attr("__version__") = VERSION_STRING;

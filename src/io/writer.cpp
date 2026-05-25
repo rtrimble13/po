@@ -112,6 +112,15 @@ std::string resultToJSON(const OptimizationResult& r, int indent) {
     conv["kkt_residual"]    = r.kkt_residual;
     conv["dual_estimate"]   = r.dual_estimate;
     j["convergence"] = conv;
+
+    if (!r.library_version.empty() || !r.input_hash.empty() ||
+        !r.params_hash.empty()) {
+        json audit;
+        audit["library_version"] = r.library_version;
+        audit["input_hash"]      = r.input_hash;
+        audit["params_hash"]     = r.params_hash;
+        j["audit"] = audit;
+    }
     return j.dump(indent);
 }
 

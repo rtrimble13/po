@@ -4,6 +4,7 @@ add_library(portopt_lib STATIC
     mvo.cpp
     black_litterman.cpp
     estimation.cpp
+    portfolios.cpp
     io/reader.cpp
     io/writer.cpp
 )

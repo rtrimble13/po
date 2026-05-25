@@ -7,6 +7,7 @@ add_executable(portopt_tests
     test_estimation.cpp
     test_io.cpp
     test_integration.cpp
+    test_portfolios.cpp
 )
 
 target_link_libraries(portopt_tests

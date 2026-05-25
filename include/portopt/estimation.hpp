@@ -83,6 +83,24 @@ Matrix oasShrinkage(const Matrix& returns,
                     double* out_delta = nullptr);
 
 /**
+ * @brief Exponentially-weighted covariance (RiskMetrics-style).
+ *
+ * Weights the most recent observation by (1 − λ), the one before by
+ * λ (1 − λ), … Σ_t = (1 − λ) · Σ_{k=0..T-1} λ^k · x_{T-1-k} x_{T-1-k}'.
+ * The mean is removed using the same exponential weighting. Equivalent
+ * to a discount factor `lambda` on the previous covariance with shock
+ * (1 − λ) · r_t r_t' each step (the standard RiskMetrics recursion).
+ *
+ * @param returns           Returns matrix (T×n)
+ * @param lambda            Decay factor ∈ (0, 1) — RiskMetrics uses 0.94
+ *                          for daily, 0.97 for monthly
+ * @param periods_per_year  Annualisation factor
+ */
+Matrix ewmaCovariance(const Matrix& returns,
+                      double lambda = 0.94,
+                      double periods_per_year = 1.0);
+
+/**
  * @brief Convenience: build a MarketData from a returns matrix.
  *
  * @param tickers           Asset tickers (length n)

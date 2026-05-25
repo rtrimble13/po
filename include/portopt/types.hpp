@@ -218,6 +218,13 @@ struct OptimizationResult {
     double             primal_residual{0.0};  ///< ‖w_{k+1} − w_k‖ at exit
     double             kkt_residual{0.0};     ///< L∞ KKT optimality residual (see qp_solver.hpp)
     double             dual_estimate{0.0};    ///< Estimated multiplier ν̂ on the budget constraint
+
+    // Audit trail (B16) — populated by the optimiser; stable across runs
+    // with identical inputs and library version. Use to verify
+    // reproducibility / detect data or parameter drift between runs.
+    std::string        library_version;    ///< portopt version string at solve time
+    std::string        input_hash;         ///< Hex digest of (μ, Σ, w_mkt, b, rf)
+    std::string        params_hash;        ///< Hex digest of (λ, lb, ub, budget, …)
 };
 
 /// A single point on the efficient frontier.

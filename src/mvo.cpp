@@ -230,6 +230,37 @@ void MVOptimizer::augmentBenchmarkMetrics(PortfolioMetrics& metrics,
     (void)risk_free_rate;
 }
 
+// ── B1: build the Q, f modification for a Lagrangian TE penalty ─────────────
+// At Lagrangian multiplier μ ≥ 0, replace the objective with
+//     w'Σw − λμ_r'w  +  μ · (w−b)'Σ(w−b)
+//   = (1 + μ) w'Σw − (λμ_r + 2μΣb)'w + μ·b'Σb
+static void applyTrackingErrorLagrangian(Matrix& Q, Vector& f,
+                                          const Matrix& Sigma,
+                                          const Vector& b,
+                                          double mu_te) {
+    if (mu_te <= 0.0) return;
+    Q.noalias() += (2.0 * mu_te) * Sigma;
+    f.noalias() -= (2.0 * mu_te) * (Sigma * b);
+}
+
+// ── B2: linearise |w|_1 ≤ L around a fixed sign vector ──────────────────────
+// Replace `Σ|w_i| ≤ L` with `s'w ≤ L` for the current sign estimate s. The
+// outer fixed-point iteration in `optimizeFor` re-evaluates `s` from the
+// previous solve until signs stabilise. When signs converge, `s'w = |w|_1`
+// and the linear cap is exactly the gross-exposure cap. The iteration is a
+// heuristic — pathological data can cause sign-flip oscillation; in that
+// case the constraint is enforced only approximately. For institutional
+// hard enforcement use the variable-splitting reformulation (out of scope
+// for this iteration).
+static GroupConstraint leverageGroup(const Vector& signs, double L) {
+    GroupConstraint g;
+    g.description  = "gross exposure";
+    g.coefficients = signs;
+    g.lower = -1e30;
+    g.upper = L;
+    return g;
+}
+
 // ── Core single-λ solve ───────────────────────────────────────────────────────
 
 OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
@@ -242,30 +273,130 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
         cons = PortfolioConstraints::longOnly(n);
     cons.validate(n);
 
-    // QP: min  w'Σw - λμ'w  ≡  min  0.5 w'(2Σ)w + (-λμ)'w
-    Matrix Q = 2.0 * data.covariance;
-    Vector f = -risk_aversion * data.expected_returns;
+    const bool want_te = cons.tracking_error_limit > 0.0 &&
+                         data.benchmark_weights.has_value() &&
+                         data.benchmark_weights->size() == n;
+    const bool want_lev = cons.gross_exposure_limit > 0.0;
 
-    // Turnover penalty: + κ‖w − w₀‖²  →  Q += 2κI,  f += -2κ w₀
-    if (cons.turnover_penalty > 0.0 && cons.current_weights.size() == n) {
-        const double k2 = 2.0 * cons.turnover_penalty;
-        Q.diagonal().array() += k2;
-        f.noalias() -= k2 * cons.current_weights;
-    }
+    // ── B1: outer loop on TE Lagrangian μ_te ────────────────────────────────
+    // ── B2: outer loop on leverage sign vector s ────────────────────────────
+    // Both wrap the underlying QP solve. We bracket μ_te ∈ [0, μ_te_max]
+    // and bisect until realised TE matches the limit (or μ_te = 0 if the
+    // unconstrained solve already satisfies it).
+    auto solve_once = [&](double mu_te,
+                          const std::vector<GroupConstraint>& extra_groups) {
+        Matrix Q = 2.0 * data.covariance;
+        Vector f = -risk_aversion * data.expected_returns;
 
-    solver_cfg_.budget = cons.budget;
+        // Turnover penalty: + κ‖w − w₀‖²  →  Q += 2κI,  f += -2κ w₀
+        if (cons.turnover_penalty > 0.0 && cons.current_weights.size() == n) {
+            const double k2 = 2.0 * cons.turnover_penalty;
+            Q.diagonal().array() += k2;
+            f.noalias() -= k2 * cons.current_weights;
+        }
+        // B1: tracking-error Lagrangian
+        if (mu_te > 0.0 && data.benchmark_weights.has_value())
+            applyTrackingErrorLagrangian(Q, f, data.covariance,
+                                         *data.benchmark_weights, mu_te);
+
+        // Merge user groups + extra (e.g. leverage)
+        std::vector<GroupConstraint> all_groups = cons.groups;
+        for (const auto& g : extra_groups) all_groups.push_back(g);
+
+        solver_cfg_.budget = cons.budget;
+        if (params_.hard_group_constraints && !all_groups.empty()) {
+            return qp::solveWithHardGroups(
+                Q, f, cons.lower_bounds, cons.upper_bounds,
+                all_groups, params_.group_penalty,
+                params_.group_tolerance, 30, solver_cfg_);
+        }
+        return qp::solveWithGroups(
+            Q, f, cons.lower_bounds, cons.upper_bounds,
+            all_groups, params_.group_penalty, solver_cfg_);
+    };
 
     const auto t0 = std::chrono::steady_clock::now();
+
+    // B2 leverage fixed-point: start from sign of current_weights (or all +1).
+    Vector leverage_signs;
+    if (want_lev) {
+        if (cons.current_weights.size() == n) {
+            leverage_signs = Vector::Zero(n);
+            for (int i = 0; i < n; ++i)
+                leverage_signs[i] = cons.current_weights[i] >= 0 ? 1.0 : -1.0;
+        } else {
+            leverage_signs = Vector::Ones(n);
+        }
+    }
+
     qp::SolverResult qp;
-    if (params_.hard_group_constraints && !cons.groups.empty()) {
-        qp = qp::solveWithHardGroups(
-            Q, f, cons.lower_bounds, cons.upper_bounds,
-            cons.groups, params_.group_penalty,
-            params_.group_tolerance, /*max_outer_iters=*/30, solver_cfg_);
-    } else {
-        qp = qp::solveWithGroups(
-            Q, f, cons.lower_bounds, cons.upper_bounds,
-            cons.groups, params_.group_penalty, solver_cfg_);
+    int te_iters = 0, lev_iters = 0;
+    double mu_te = 0.0;
+
+    auto build_extras = [&]() {
+        std::vector<GroupConstraint> extras;
+        if (want_lev)
+            extras.push_back(leverageGroup(leverage_signs,
+                                            cons.gross_exposure_limit));
+        return extras;
+    };
+
+    // Joint outer iteration: alternates leverage-sign update and TE bisection.
+    for (int outer = 0; outer < 20; ++outer) {
+        bool changed = false;
+
+        // First, solve at current μ_te / signs and check TE
+        qp = solve_once(mu_te, build_extras());
+
+        // B1 bisection on μ_te
+        if (want_te) {
+            const Vector active = qp.x - *data.benchmark_weights;
+            double te2 = active.dot(data.covariance * active);
+            const double te_target2 =
+                cons.tracking_error_limit * cons.tracking_error_limit;
+            if (mu_te == 0.0 && te2 <= te_target2 + 1e-12) {
+                // Unconstrained TE is already within limit — no work needed.
+            } else if (te2 > te_target2 + 1e-9) {
+                // Bisect μ_te ∈ [mu_te, mu_hi] until TE meets target.
+                double lo = mu_te, hi = std::max(1.0, mu_te) * 1024.0;
+                // Grow hi until feasible
+                for (int k = 0; k < 12; ++k) {
+                    auto qp_hi = solve_once(hi, build_extras());
+                    const Vector a_hi = qp_hi.x - *data.benchmark_weights;
+                    const double t_hi = a_hi.dot(data.covariance * a_hi);
+                    if (t_hi <= te_target2) { qp = qp_hi; break; }
+                    lo = hi; hi *= 4.0;
+                    if (k == 11) qp = qp_hi;  // give up; use largest
+                }
+                // Bisect
+                for (int k = 0; k < 30; ++k) {
+                    const double mid = 0.5 * (lo + hi);
+                    auto qp_mid = solve_once(mid, build_extras());
+                    const Vector a_mid = qp_mid.x - *data.benchmark_weights;
+                    const double t_mid = a_mid.dot(data.covariance * a_mid);
+                    if (t_mid > te_target2) lo = mid;
+                    else                    { hi = mid; qp = qp_mid; }
+                    if (hi - lo < 1e-4 * std::max(1.0, hi)) break;
+                }
+                mu_te = hi;
+                changed = true;
+                ++te_iters;
+            }
+        }
+
+        // B2 update leverage signs from new solution
+        if (want_lev) {
+            Vector new_signs(n);
+            for (int i = 0; i < n; ++i)
+                new_signs[i] = qp.x[i] >= 0.0 ? 1.0 : -1.0;
+            if ((new_signs - leverage_signs).cwiseAbs().maxCoeff() > 1e-9) {
+                leverage_signs = new_signs;
+                changed = true;
+                ++lev_iters;
+            }
+        }
+
+        if (!changed) break;
     }
     const auto t1 = std::chrono::steady_clock::now();
 

@@ -541,6 +541,66 @@ TEST_CASE("Singular covariance (perfect correlation) still produces feasible wei
     CHECK(r.weights[1] >= -1e-9);
 }
 
+// ── B1: tracking-error constraint ────────────────────────────────────────────
+
+TEST_CASE("Tracking-error constraint is honoured", "[mvo][te][b1]") {
+    auto data = fiveAssets();
+    // Equal-weight benchmark
+    data.benchmark_weights = Vector::Constant(5, 0.20);
+
+    MVOParameters p;
+    p.constraints = PortfolioConstraints::longOnly(5);
+    p.risk_aversion = 5.0;
+
+    // First solve without TE — get the unconstrained TE for reference.
+    MVOptimizer opt(p);
+    auto r_unc = opt.optimize(data);
+    const double te_unc = r_unc.metrics.tracking_error;
+
+    // Now cap TE at half the unconstrained value.
+    p.constraints.tracking_error_limit = 0.5 * te_unc;
+    opt.setParameters(p);
+    auto r_te = opt.optimize(data);
+    REQUIRE(r_te.converged);
+    CHECK(r_te.metrics.tracking_error <=
+          p.constraints.tracking_error_limit + 1e-4);
+    // Sanity: should still beat the benchmark on Sharpe a bit
+    CHECK(r_te.metrics.sharpe_ratio > 0.0);
+}
+
+// ── B2: gross-exposure / leverage cap ────────────────────────────────────────
+
+TEST_CASE("Gross-exposure cap reduces leverage vs unconstrained",
+          "[mvo][leverage][b2]") {
+    auto data = fiveAssets();
+    MVOParameters p;
+    // 130/30-style — must allow shorts
+    p.constraints = PortfolioConstraints::withShorts(5, 1.0);
+    p.constraints.budget = 1.0;
+    p.risk_aversion = 3.0;
+
+    // Unconstrained baseline (no leverage cap)
+    MVOptimizer opt(p);
+    const double gross_unc = opt.optimize(data).weights.cwiseAbs().sum();
+
+    // With leverage cap — sign-iteration heuristic substantially reduces gross.
+    p.constraints.gross_exposure_limit = 1.4;
+    p.hard_group_constraints = true;
+    p.group_tolerance = 1e-4;
+    p.group_penalty = 1e4;
+    opt.setParameters(p);
+    auto r = opt.optimize(data);
+    const double gross_cap = r.weights.cwiseAbs().sum();
+
+    // Heuristic linearisation cannot guarantee |w|_1 ≤ L exactly, but it
+    // must meaningfully reduce gross exposure compared to the unconstrained
+    // solution. (Hard enforcement would require variable-splitting; see B2
+    // notes in the source for the rationale.)
+    CHECK(gross_cap < gross_unc);
+    CHECK(gross_cap < 0.85 * gross_unc);
+    CHECK(r.weights.sum() == Approx(1.0).margin(1e-3));
+}
+
 TEST_CASE("Extreme λ sweep does not crash or NaN out",
           "[mvo][stress][a10]") {
     auto data = fiveAssets();

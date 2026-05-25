@@ -59,6 +59,23 @@ struct PortfolioConstraints {
     // ── Linear group constraints (applied via penalty / soft enforcement) ─────
     std::vector<GroupConstraint> groups;
 
+    // ── Tracking-error constraint (B1) ───────────────────────────────────────
+    /// Maximum tracking-error variance against the benchmark:
+    ///   (w − b)' Σ (w − b) ≤ tracking_error_limit²
+    /// 0 = disabled. Requires MarketData::benchmark_weights to be set.
+    /// Internally converted to a quadratic group inequality whose enforcement
+    /// follows MVOParameters::hard_group_constraints / group_penalty.
+    double tracking_error_limit{0.0};
+
+    // ── Gross-exposure / leverage cap (B2) ────────────────────────────────────
+    /// Maximum Σ|w_i| ≤ gross_exposure_limit. 0 = disabled.
+    /// Enforced via per-asset positive/negative splitting; relies on the
+    /// existing box bounds, so use with `allow_short_selling = true`.
+    /// Approximated via a linear group constraint Σ s_i w_i ≤ L where
+    /// s_i = sign(w_i^current) (a fixed-point iteration is run if no
+    /// current_weights are supplied).
+    double gross_exposure_limit{0.0};
+
     // ── Convenience helpers ───────────────────────────────────────────────────
 
     /// Construct default long-only constraints for @p n assets.

@@ -130,6 +130,22 @@ po mvo -d assets.json --ascii
 po report -d assets.json -p params.toml -o reports/
 ```
 
+### Walkthroughs
+
+A runnable, walkthrough-style introduction to every CLI feature lives under
+[examples/terminal/](examples/terminal/) — one shell script + Markdown
+explainer per optimisation feature, shared dummy data, generated output
+collected under `examples/terminal/var/`. Build the binary and run any
+example:
+
+```bash
+cmake --build build --target portopt_cli
+examples/terminal/scripts/01_mvo_basic.sh
+```
+
+Or run the whole suite as a smoke test with
+[examples/terminal/scripts/run_all.sh](examples/terminal/scripts/run_all.sh).
+
 ## Python usage
 
 ```python

@@ -1,0 +1,14 @@
+# MVO with an L2 turnover penalty against a "current" book.
+# The current portfolio is equal-weighted; the penalty discourages large
+# moves away from it on rebalance.
+
+[mvo]
+risk_aversion  = 2.5
+risk_free_rate = 0.04
+
+[mvo.constraints]
+lower_bounds     = [0.0, 0.0, 0.0, 0.0, 0.0]
+upper_bounds     = [0.4, 0.4, 0.4, 0.4, 0.4]
+budget           = 1.0
+current_weights  = [0.20, 0.20, 0.20, 0.20, 0.20]
+turnover_penalty = 1.5

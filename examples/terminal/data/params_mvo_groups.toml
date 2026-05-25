@@ -1,0 +1,28 @@
+# MVO with sector group caps. Tickers are ordered:
+#   index 0 = AAPL (Tech)
+#   index 1 = MSFT (Tech)
+#   index 2 = JPM  (Financials)
+#   index 3 = JNJ  (Healthcare)
+#   index 4 = XOM  (Energy)
+
+[mvo]
+risk_aversion  = 2.5
+risk_free_rate = 0.04
+
+[mvo.constraints]
+lower_bounds = [0.0, 0.0, 0.0, 0.0, 0.0]
+upper_bounds = [0.5, 0.5, 0.5, 0.5, 0.5]
+budget       = 1.0
+
+# Sector limit: Tech (AAPL + MSFT) capped at 50 %, Energy capped at 15 %.
+[[mvo.constraints.groups]]
+description  = "Tech sector exposure (AAPL + MSFT) <= 50%"
+coefficients = [1.0, 1.0, 0.0, 0.0, 0.0]
+lower        = 0.0
+upper        = 0.5
+
+[[mvo.constraints.groups]]
+description  = "Energy sector exposure (XOM) <= 15%"
+coefficients = [0.0, 0.0, 0.0, 0.0, 1.0]
+lower        = 0.0
+upper        = 0.15

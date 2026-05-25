@@ -1,0 +1,32 @@
+# Black-Litterman parameters.
+# Prior is the equilibrium return implied by the market weights in assets.json.
+# Two illustrative views are blended with the prior.
+
+[mvo]
+risk_aversion  = 2.5
+risk_free_rate = 0.04
+
+[mvo.constraints]
+lower_bounds = [0.0, 0.0, 0.0, 0.0, 0.0]
+upper_bounds = [0.5, 0.5, 0.5, 0.5, 0.5]
+budget       = 1.0
+
+[black_litterman]
+tau             = 0.05
+risk_aversion   = 2.5
+confidence_mode = "variance"
+
+# View 1: Tech (AAPL + MSFT, equal-weight inside the view) outperforms
+# Financials (JPM) by 5% annualised.
+[[black_litterman.views]]
+description     = "Tech (AAPL,MSFT) outperforms Financials (JPM) by 5%"
+pick_vector     = [0.5, 0.5, -1.0, 0.0, 0.0]
+expected_return = 0.05
+confidence      = 0.001
+
+# View 2: Energy (XOM) outperforms Healthcare (JNJ) by 2%.
+[[black_litterman.views]]
+description     = "Energy (XOM) outperforms Healthcare (JNJ) by 2%"
+pick_vector     = [0.0, 0.0, 0.0, -1.0, 1.0]
+expected_return = 0.02
+confidence      = 0.002

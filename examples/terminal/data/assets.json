@@ -1,0 +1,19 @@
+{
+  "assets": [
+    { "ticker": "AAPL", "name": "Apple Inc.",         "expected_return": 0.152, "market_cap": 2800000000000, "sector": "Tech" },
+    { "ticker": "MSFT", "name": "Microsoft Corp.",    "expected_return": 0.141, "market_cap": 2500000000000, "sector": "Tech" },
+    { "ticker": "JPM",  "name": "JPMorgan Chase",     "expected_return": 0.098, "market_cap":  480000000000, "sector": "Financials" },
+    { "ticker": "JNJ",  "name": "Johnson & Johnson",  "expected_return": 0.072, "market_cap":  420000000000, "sector": "Healthcare" },
+    { "ticker": "XOM",  "name": "ExxonMobil",         "expected_return": 0.088, "market_cap":  450000000000, "sector": "Energy" }
+  ],
+  "covariance": [
+    [0.0529, 0.0224, 0.0110, 0.0060, 0.0080],
+    [0.0224, 0.0441, 0.0095, 0.0055, 0.0070],
+    [0.0110, 0.0095, 0.0324, 0.0110, 0.0120],
+    [0.0060, 0.0055, 0.0110, 0.0196, 0.0090],
+    [0.0080, 0.0070, 0.0120, 0.0090, 0.0400]
+  ],
+  "market_weights":    [0.30, 0.28, 0.18, 0.12, 0.12],
+  "benchmark_weights": [0.30, 0.28, 0.18, 0.12, 0.12],
+  "risk_free_rate":    0.04
+}

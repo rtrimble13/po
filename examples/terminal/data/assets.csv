@@ -1,0 +1,6 @@
+ticker,name,expected_return,market_cap,sector
+AAPL,Apple Inc.,0.152,2800000000000,Tech
+MSFT,Microsoft Corp.,0.141,2500000000000,Tech
+JPM,JPMorgan Chase,0.098,480000000000,Financials
+JNJ,Johnson & Johnson,0.072,420000000000,Healthcare
+XOM,ExxonMobil,0.088,450000000000,Energy

@@ -1,0 +1,6 @@
+# Generated example output
+var/*
+!var/.gitkeep
+
+# Staged copy of the po binary (created by `cmake --build build --target po-examples`)
+bin/

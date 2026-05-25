@@ -1,0 +1,13 @@
+# Dollar-neutral long/short MVO (budget = 0).
+# Lower bounds allow up to 50% short per name, upper bounds 50% long.
+
+[mvo]
+risk_aversion  = 2.5
+risk_free_rate = 0.04
+
+[mvo.constraints]
+lower_bounds         = [-0.5, -0.5, -0.5, -0.5, -0.5]
+upper_bounds         = [ 0.5,  0.5,  0.5,  0.5,  0.5]
+budget               = 0.0
+allow_short_selling  = true
+gross_exposure_limit = 2.0

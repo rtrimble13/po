@@ -79,6 +79,12 @@ from ._portopt import (  # noqa: F401
     estimation,
     # Portfolios submodule (B15 / B3)
     portfolios,
+    # Factor risk model (B7 / B8)
+    FactorRiskModel,
+    FactorRiskDecomposition,
+    decompose_risk,
+    factor_neutral_constraint,
+    beta_neutral_constraint,
     # Version
     __version__,
 )

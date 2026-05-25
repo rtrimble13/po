@@ -5,6 +5,7 @@ add_library(portopt_lib STATIC
     black_litterman.cpp
     estimation.cpp
     portfolios.cpp
+    factor_model.cpp
     io/reader.cpp
     io/writer.cpp
 )

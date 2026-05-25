@@ -8,6 +8,7 @@ add_executable(portopt_tests
     test_io.cpp
     test_integration.cpp
     test_portfolios.cpp
+    test_factor_model.cpp
 )
 
 target_link_libraries(portopt_tests

@@ -453,6 +453,41 @@ PYBIND11_MODULE(_portopt, m) {
            py::arg("seed")          = 42u,
            "Resampled (Michaud) MVO via bootstrap averaging.");
 
+    // ── Factor risk model (B7 / B8) ───────────────────────────────────────────
+    py::class_<FactorRiskModel>(m, "FactorRiskModel")
+        .def(py::init<>())
+        .def_readwrite("loadings",          &FactorRiskModel::loadings)
+        .def_readwrite("factor_covariance", &FactorRiskModel::factor_covariance)
+        .def_readwrite("specific_variance", &FactorRiskModel::specific_variance)
+        .def_readwrite("factor_names",      &FactorRiskModel::factor_names)
+        .def("validate",          &FactorRiskModel::validate)
+        .def("asset_covariance",  &FactorRiskModel::assetCovariance,
+             "Reconstruct Σ = B·Ω_F·B' + diag(D).")
+        .def_property_readonly("num_assets",  &FactorRiskModel::numAssets)
+        .def_property_readonly("num_factors", &FactorRiskModel::numFactors);
+
+    py::class_<FactorRiskDecomposition>(m, "FactorRiskDecomposition")
+        .def_readonly("factor_exposures",   &FactorRiskDecomposition::factor_exposures)
+        .def_readonly("factor_variance",    &FactorRiskDecomposition::factor_variance)
+        .def_readonly("systematic_variance",&FactorRiskDecomposition::systematic_variance)
+        .def_readonly("specific_variance",  &FactorRiskDecomposition::specific_variance)
+        .def_readonly("total_variance",     &FactorRiskDecomposition::total_variance);
+
+    m.def("decompose_risk", &decomposeRisk,
+          py::arg("factor_model"), py::arg("weights"),
+          "Decompose portfolio risk into per-factor systematic + specific.");
+    m.def("factor_neutral_constraint", &factorNeutralConstraint,
+          py::arg("factor_model"), py::arg("factor_index"),
+          py::arg("lower")       = 0.0,
+          py::arg("upper")       = 0.0,
+          py::arg("description") = std::string(""),
+          "Build a GroupConstraint pinning the portfolio's net loading on "
+          "the named factor to [lower, upper].");
+    m.def("beta_neutral_constraint", &betaNeutralConstraint,
+          py::arg("factor_model"), py::arg("benchmark_weights"),
+          py::arg("lower") = -0.05, py::arg("upper") = 0.05,
+          "Build a GroupConstraint for β-neutrality against the benchmark.");
+
     // ── Version ───────────────────────────────────────────────────────────────
     m.attr("__version__") = VERSION_STRING;
 }

@@ -29,6 +29,10 @@ struct Asset {
     double      expected_return{0.0}; ///< Annualised expected return (μ — see notes)
     double      market_cap{0.0};      ///< Market capitalisation (for BL prior)
     std::string sector;       ///< Optional group/sector label (e.g. "Technology")
+    /// Quote currency, e.g. "USD", "EUR", "JPY". Empty = treated as the base
+    /// currency. Used by portopt::fx helpers (B13) to compute hedged
+    /// returns and currency exposures.
+    std::string currency;
 };
 
 /// Collection of assets forming the investment universe.

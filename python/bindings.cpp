@@ -64,6 +64,7 @@ PYBIND11_MODULE(_portopt, m) {
         .def_readwrite("expected_return", &Asset::expected_return)
         .def_readwrite("market_cap",      &Asset::market_cap)
         .def_readwrite("sector",          &Asset::sector)
+        .def_readwrite("currency",        &Asset::currency)
         .def("__repr__", [](const Asset& a) {
             return "<Asset ticker=" + a.ticker + " return=" +
                    std::to_string(a.expected_return) + ">";
@@ -487,6 +488,24 @@ PYBIND11_MODULE(_portopt, m) {
           py::arg("factor_model"), py::arg("benchmark_weights"),
           py::arg("lower") = -0.05, py::arg("upper") = 0.05,
           "Build a GroupConstraint for β-neutrality against the benchmark.");
+
+    // ── Multi-currency helpers (B13) ──────────────────────────────────────────
+    py::module_ fx_mod = m.def_submodule("fx",
+        "Multi-currency helpers: hedged returns and currency exposures.");
+    py::class_<fx::CurrencyExposure>(m, "CurrencyExposure")
+        .def_readonly("currency", &fx::CurrencyExposure::currency)
+        .def_readonly("weight",   &fx::CurrencyExposure::weight);
+    fx_mod.def("currency_exposure", &fx::currencyExposure,
+               py::arg("assets"), py::arg("weights"),
+               py::arg("base_currency") = std::string("BASE"));
+    fx_mod.def("convert_expected_returns", &fx::convertExpectedReturns,
+               py::arg("assets"), py::arg("mu_local"),
+               py::arg("fx_returns"),
+               py::arg("hedge_ratio") = 0.0);
+    fx_mod.def("currency_exposure_constraint",
+               &fx::currencyExposureConstraint,
+               py::arg("assets"), py::arg("currency"),
+               py::arg("lower"), py::arg("upper"));
 
     // ── Version ───────────────────────────────────────────────────────────────
     m.attr("__version__") = VERSION_STRING;

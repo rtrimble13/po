@@ -31,6 +31,7 @@
 #include "estimation.hpp"
 #include "portfolios.hpp"
 #include "factor_model.hpp"
+#include "fx.hpp"
 #include "io/reader.hpp"
 #include "io/writer.hpp"
 #include "logging.hpp"

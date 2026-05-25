@@ -6,6 +6,7 @@ add_library(portopt_lib STATIC
     estimation.cpp
     portfolios.cpp
     factor_model.cpp
+    fx.cpp
     io/reader.cpp
     io/writer.cpp
 )

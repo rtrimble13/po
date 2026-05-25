@@ -402,6 +402,11 @@ PYBIND11_MODULE(_portopt, m) {
            py::arg("covariance"));
     pf.def("market_cap_weighted", &portfolios::marketCapWeighted,
            py::arg("assets"));
+    pf.def("equal_risk_contribution", &portfolios::equalRiskContribution,
+           py::arg("covariance"),
+           py::arg("tolerance") = 1e-8,
+           py::arg("max_iters") = 5000,
+           "Equal Risk Contribution (risk parity) portfolio.");
 
     // ── Version ───────────────────────────────────────────────────────────────
     m.attr("__version__") = VERSION_STRING;

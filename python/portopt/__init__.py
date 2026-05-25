@@ -101,6 +101,12 @@ from .helpers import (  # noqa: F401
     risk_contributions_to_dataframe,
 )
 
+# B9 walk-forward backtester, B10 advanced analytics, B11 attribution
+# All three are pure-Python and require only NumPy.
+from . import analytics       # noqa: F401
+from . import backtest        # noqa: F401
+from . import attribution     # noqa: F401
+
 # ── C1: dict ↔ struct helpers (MCP-friendly) ─────────────────────────────────
 # These thin wrappers let callers (especially MCP servers) build/inspect
 # parameter objects entirely through Python dicts, without touching the

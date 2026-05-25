@@ -6,22 +6,30 @@ A high-performance C++ library for portfolio optimisation, with Python bindings,
 
 | Feature | Detail |
 |---|---|
-| **Core algorithms** | MVO, Black-Litterman (variance- and Idzorek-mode confidences) |
-| **PM-friendly portfolios** | Min-variance, max-Sharpe, target-volatility, target-return |
-| **Convenience portfolios** | Equal-weight, inverse-variance, inverse-volatility, market-cap, equal-risk-contribution (risk parity) |
-| **Constraints** | Box bounds, budget (incl. dollar-neutral & 130/30), fix/forbid assets, group caps, L2 turnover penalty |
-| **Estimation** | Sample / Ledoit-Wolf / OAS / linear / EWMA shrinkage from returns CSV |
-| **Metrics** | Sharpe (rf-aware), risk contributions, diversification ratio, effective N, tracking error, IR, active share, beta, turnover |
+| **Core algorithms** | MVO, Black-Litterman (variance- and Idzorek-mode confidences), minimum-CVaR (Rockafellar-Uryasev) |
+| **PM-friendly portfolios** | Min-variance, max-Sharpe (with A3 analytical tangent fast path), target-volatility, target-return |
+| **Convenience portfolios** | Equal-weight, inverse-variance, inverse-volatility, market-cap, equal-risk-contribution (risk parity), **hierarchical risk parity**, **maximum diversification**, **resampled / Michaud MVO** |
+| **Constraints** | Box bounds, budget (dollar-neutral & 130/30), fix/forbid, group caps (soft + **hard via augmented Lagrangian**), L2 turnover, **tracking-error**, **gross-exposure / leverage**, **factor-neutral**, **beta-neutral**, **currency-exposure** |
+| **Risk model** | Multi-factor `FactorRiskModel(B, Ω_F, D)` with Σ = BΩᶠB' + D reconstruction, per-factor risk decomposition, systematic vs specific split |
+| **Transaction costs** | Linear (sign-iteration) and quadratic (Almgren-Chriss style) per-asset costs |
+| **Multi-currency** | `Asset.currency`, currency-exposure aggregation, hedged-return conversion with [0,1] hedge ratio |
+| **Estimation** | Sample / **exact Ledoit-Wolf** / OAS / linear / EWMA / Michaud-resampled |
+| **Metrics** | Sharpe (rf-aware), Sortino, Calmar, Omega, max-drawdown, Ulcer, downside-deviation, risk contributions, diversification ratio, effective N, tracking error, IR, active share, beta, turnover, **realised CVaR** |
+| **Backtesting** | `portopt.backtest.walk_forward()` — rolling-window estimation + periodic rebalance + trade list + per-rebalance turnover and transaction costs |
+| **Attribution** | Brinson-Fachler and Brinson-Hood-Beebower (allocation / selection / interaction) |
 | **Solver diagnostics** | Primal residual, KKT residual, dual estimate ν̂ — reported on every result |
+| **Solver controls** | Cancellation token + `timeout_ms` (FISTA polls between iterations) |
 | **Audit trail** | Library version + input/params FNV-1a hash stamped on every result (reproducibility) |
 | **Black-Litterman diagnostics** | Pick-matrix rank / smallest singular value, posterior condition number |
+| **Errors** | Typed hierarchy: `PortoptError`, `InvalidMarketData`, `InvalidParameters`, `InfeasibleProblem`, `SolverDidNotConverge`, `SolverCancelled`, `SolverTimeout`, each with a stable machine-readable `.code` |
+| **MCP-ready** | Pydantic schemas (`portopt.schemas`) with JSON-Schema export, reference dispatcher (`portopt.mcp_server.PortoptToolServer`) exposing 10 tools |
 | **Language** | C++17 library; Python bindings via pybind11 |
 | **CLI** | Cross-platform binary (`po`); ASCII-fallback console for Windows |
 | **Input formats** | JSON / CSV (market data); JSON / TOML (parameters); returns CSV; **JSON strings** for in-memory MCP use |
 | **Output formats** | Console table, JSON (full / summary), CSV; notional $ exposure; "explain" mode for active bounds; pandas-free frontier records |
 | **Logging** | spdlog-backed, configurable level + rotating file sink |
 | **Diagnostics** | Jupyter notebook template with automatic report generation |
-| **Tests** | Catch2 (C++) + pytest (Python MCP surface) — 107 C++ test cases, 7 Python test cases |
+| **Tests** | Catch2 (C++) — 134 test cases, 530 assertions |
 
 ## Quick start
 
@@ -387,6 +395,106 @@ portopt/
 └── docs/
     ├── user_guide.md
     └── api_reference.md
+```
+
+## MCP integration
+
+The library ships a reference tool dispatcher under
+`portopt.mcp_server` that wraps every optimiser entry point as a stateless
+JSON RPC. It requires `pydantic >= 2`.
+
+```python
+from portopt.mcp_server import PortoptToolServer
+
+server = PortoptToolServer()
+
+# Discovery — drives MCP "list_tools"
+tools = server.list_tools()           # [{name, description, input_schema, output_schema}, ...]
+
+# Call any tool by name; inputs are plain JSON-compatible dicts.
+resp = server.call(
+    "optimize_mvo",
+    data   = {"assets": [...], "expected_returns": [...], "covariance": [[...]]},
+    params = {"risk_aversion": 2.0, "constraints": {"lower_bounds": [...], "upper_bounds": [...]}}
+)
+# resp = {"data": {weights, metrics, ...}}  on success
+# resp = {"error": {"type": "InfeasibleProblem", "code": "...", "message": "..."}}  on failure
+```
+
+JSON schemas for inputs and outputs are also available directly:
+
+```python
+from portopt.schemas import MVOParametersSchema, tool_manifest
+schema = MVOParametersSchema.model_json_schema()
+manifest = tool_manifest()
+```
+
+Wire the dispatcher to your preferred MCP framework (e.g. the official
+`anthropic-ai/mcp` Python SDK) — `PortoptToolServer` is transport-agnostic.
+
+## Advanced features (B-track)
+
+```python
+# B3 risk parity
+w_erc = portopt.portfolios.equal_risk_contribution(cov)
+
+# B4 hierarchical risk parity
+w_hrp = portopt.portfolios.hierarchical_risk_parity(cov)
+
+# B5 minimum-CVaR
+w_cvar = portopt.portfolios.minimum_cvar(returns, alpha=0.95)
+
+# B7 factor risk model + B8 factor-neutral constraint
+fm = portopt.FactorRiskModel()
+fm.loadings = B                     # n × k
+fm.factor_covariance = Omega_F      # k × k
+fm.specific_variance = D            # length n
+decomp = portopt.decompose_risk(fm, weights)
+g = portopt.factor_neutral_constraint(fm, factor_index=1, lower=-0.02, upper=0.02)
+
+# B9 walk-forward backtester (Python)
+res = portopt.backtest.walk_forward(
+    returns=R, window=126, step=21,
+    build_weights=my_strategy,
+    transaction_cost=0.0005,
+    benchmark_returns=B)
+print(res.summary(rf=0.04))
+
+# B10 advanced analytics
+stats = portopt.analytics.summarise(res.portfolio_returns)
+
+# B11 attribution
+attr = portopt.attribution.brinson_fachler(
+    group_weights_p, group_weights_b,
+    group_returns_p, group_returns_b,
+    group_names=["Tech","Health","Energy"])
+
+# B13 multi-currency
+exp = portopt.fx.currency_exposure(assets, weights)
+mu_base = portopt.fx.convert_expected_returns(
+    assets, mu_local, {"USD": 0.0, "EUR": 0.03}, hedge_ratio=0.5)
+```
+
+## Solver controls
+
+```python
+# Cancellation + timeout (C5)
+params = portopt.MVOParameters()
+params.timeout_ms = 5000
+tok = portopt.CancellationToken()
+params.cancellation = tok
+# ... from another thread: tok.cancel()
+```
+
+Typed exceptions (C4) carry a stable code:
+
+```python
+try:
+    opt.optimize(data)
+except portopt.InfeasibleProblem as e:
+    print(e)            # "[budget_outside_bounds] Infeasible: budget=..."
+except portopt.SolverTimeout:
+    ...
 ```
 
 ## License

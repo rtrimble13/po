@@ -2,6 +2,7 @@
 #include <portopt/logging.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
@@ -175,9 +176,31 @@ static SolverResult solveImpl(const Matrix&                        Q,
         return g;
     };
 
+    // C5: cancellation + timeout checks. Polled every iteration; throws
+    // portopt::SolverCancelled / SolverTimeout with a stable reason code
+    // when triggered so the caller (and any MCP wrapper) can react.
+    const auto start = std::chrono::steady_clock::now();
+    auto check_cancel = [&]() {
+        if (cfg.cancellation.isCancellationRequested())
+            throw SolverCancelled(
+                "solver_cancelled",
+                "QP solver cancelled by caller via CancellationToken");
+        if (cfg.timeout_ms > 0.0) {
+            const double elapsed_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count();
+            if (elapsed_ms > cfg.timeout_ms)
+                throw SolverTimeout(
+                    "solver_timeout",
+                    "QP solver exceeded timeout_ms=" +
+                    std::to_string(cfg.timeout_ms));
+        }
+    };
+
     if (!cfg.use_nesterov) {
         // Plain projected gradient
         for (int iter = 0; iter < cfg.max_iterations; ++iter) {
+            check_cancel();
             const Vector grad = gradient(w);
             const Vector w_new = projectOntoSimplex(w - grad / L, cfg.budget, lb, ub);
             const double residual = (w_new - w).norm();
@@ -200,6 +223,7 @@ static SolverResult solveImpl(const Matrix&                        Q,
         double t = 1.0;
 
         for (int iter = 0; iter < cfg.max_iterations; ++iter) {
+            check_cancel();
             const Vector grad = gradient(y);
             const Vector w_new = projectOntoSimplex(y - grad / L, cfg.budget, lb, ub);
             const double t_new = 0.5 * (1.0 + std::sqrt(1.0 + 4.0 * t * t));

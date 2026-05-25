@@ -541,6 +541,63 @@ TEST_CASE("Singular covariance (perfect correlation) still produces feasible wei
     CHECK(r.weights[1] >= -1e-9);
 }
 
+// ── C4: typed exceptions carry stable reason codes ───────────────────────────
+
+TEST_CASE("InvalidMarketData carries machine-readable code",
+          "[errors][c4]") {
+    MarketData d;
+    d.assets.resize(2);
+    d.expected_returns = Vector::Zero(2);
+    d.covariance = Matrix::Identity(2, 2);
+    d.covariance(0, 0) = -0.1;     // negative variance
+    try {
+        MVOptimizer::validateMarketData(d);
+        FAIL("expected InvalidMarketData to throw");
+    } catch (const InvalidMarketData& e) {
+        CHECK(e.code() == "negative_variance");
+    }
+}
+
+TEST_CASE("InfeasibleProblem flags impossible budgets",
+          "[errors][c4]") {
+    PortfolioConstraints c = PortfolioConstraints::longOnly(3);
+    c.budget = 5.0;     // > sum(ub) = 3
+    try {
+        c.validate(3);
+        FAIL("expected InfeasibleProblem");
+    } catch (const InfeasibleProblem& e) {
+        CHECK(e.code() == "budget_outside_bounds");
+    }
+}
+
+// ── C5: cancellation token + timeout ─────────────────────────────────────────
+
+TEST_CASE("CancellationToken stops the QP solver",
+          "[errors][c5][cancel]") {
+    auto data = fiveAssets();
+    MVOParameters p;
+    p.constraints = PortfolioConstraints::longOnly(5);
+    p.risk_aversion = 2.0;
+    // Pre-cancel so the very first iteration trips the check.
+    p.cancellation.cancel();
+
+    MVOptimizer opt(p);
+    CHECK_THROWS_AS(opt.optimize(data), SolverCancelled);
+}
+
+TEST_CASE("timeout_ms triggers SolverTimeout on tight deadlines",
+          "[errors][c5][timeout]") {
+    auto data = fiveAssets();
+    MVOParameters p;
+    p.constraints = PortfolioConstraints::longOnly(5);
+    p.risk_aversion = 2.0;
+    // 1 ns is unrealistically tight; the cancellation check at iter 1 must
+    // trip the deadline.
+    p.timeout_ms = 1e-6;
+    MVOptimizer opt(p);
+    CHECK_THROWS_AS(opt.optimize(data), SolverTimeout);
+}
+
 // ── B6: transaction-cost model ───────────────────────────────────────────────
 
 TEST_CASE("Quadratic transaction cost pulls weights toward current_weights",

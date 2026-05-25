@@ -110,14 +110,17 @@ static std::string paramsHash(const MVOParameters& p) {
 void MVOptimizer::validateMarketData(const MarketData& data) {
     const int n = static_cast<int>(data.assets.size());
     if (n == 0)
-        throw std::invalid_argument("MVO: asset universe is empty");
+        throw InvalidMarketData("empty_asset_universe",
+                                "MVO: asset universe is empty");
     if (data.expected_returns.size() != n)
-        throw std::invalid_argument(
+        throw InvalidMarketData(
+            "expected_returns_size_mismatch",
             "MVO: expected_returns size mismatch (got " +
             std::to_string(data.expected_returns.size()) +
             ", expected " + std::to_string(n) + ")");
     if (data.covariance.rows() != n || data.covariance.cols() != n)
-        throw std::invalid_argument(
+        throw InvalidMarketData(
+            "covariance_size_mismatch",
             "MVO: covariance matrix size mismatch (got " +
             std::to_string(data.covariance.rows()) + "x" +
             std::to_string(data.covariance.cols()) +
@@ -126,13 +129,16 @@ void MVOptimizer::validateMarketData(const MarketData& data) {
     // Symmetry check (relative tolerance)
     const double sym_err = (data.covariance - data.covariance.transpose()).norm();
     if (sym_err > 1e-6 * std::max(1.0, data.covariance.norm()))
-        throw std::invalid_argument("MVO: covariance matrix is not symmetric");
+        throw InvalidMarketData("covariance_not_symmetric",
+                                "MVO: covariance matrix is not symmetric");
 
     // Diagonal must be non-negative (variances)
     for (int i = 0; i < n; ++i) {
         if (data.covariance(i, i) < -1e-10)
-            throw std::invalid_argument(
-                "MVO: covariance has negative diagonal at index " + std::to_string(i));
+            throw InvalidMarketData(
+                "negative_variance",
+                "MVO: covariance has negative diagonal at index " +
+                std::to_string(i));
     }
 
     // PSD check via LDLT (fast for symmetric matrices)
@@ -153,7 +159,8 @@ void MVOptimizer::validateMarketData(const MarketData& data) {
 
     if (data.benchmark_weights.has_value() &&
         data.benchmark_weights->size() != n)
-        throw std::invalid_argument("MVO: benchmark_weights size mismatch");
+        throw InvalidMarketData("benchmark_weights_size_mismatch",
+                                "MVO: benchmark_weights size mismatch");
 }
 
 void MVOptimizer::validateData(const MarketData& data) const {
@@ -332,7 +339,9 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
         std::vector<GroupConstraint> all_groups = cons.groups;
         for (const auto& g : extra_groups) all_groups.push_back(g);
 
-        solver_cfg_.budget = cons.budget;
+        solver_cfg_.budget       = cons.budget;
+        solver_cfg_.cancellation = params_.cancellation;
+        solver_cfg_.timeout_ms   = params_.timeout_ms;
         if (params_.hard_group_constraints && !all_groups.empty()) {
             return qp::solveWithHardGroups(
                 Q, f, cons.lower_bounds, cons.upper_bounds,

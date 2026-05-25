@@ -30,6 +30,12 @@ struct SolverConfig {
     double budget{1.0};            ///< Budget constraint (sum of weights)
     bool   use_nesterov{true};     ///< Enable momentum acceleration
     Vector warm_start;             ///< Optional warm-start (empty = equal-weight)
+    /// Caller-supplied cancellation handle (C5). When triggered the solver
+    /// throws portopt::SolverCancelled at the next iteration boundary.
+    CancellationToken cancellation;
+    /// Soft deadline in milliseconds (C5); 0 disables. The solver throws
+    /// portopt::SolverTimeout when elapsed wall-time exceeds this value.
+    double timeout_ms{0.0};
 };
 
 /// Raw result from the QP solver.

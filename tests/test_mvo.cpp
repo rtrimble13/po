@@ -209,12 +209,15 @@ TEST_CASE("MVOptimizer — frontier is Pareto-efficient (return↑ vol↑)", "[m
 TEST_CASE("MVOptimizer — empty assets throws", "[mvo][validation]") {
     MarketData data;
     MVOptimizer opt;
-    CHECK_THROWS_AS(opt.optimize(data), std::invalid_argument);
+    // C4: validation now throws typed InvalidMarketData; both should still
+    // catch as the base PortoptError and (transitively) as runtime_error.
+    CHECK_THROWS_AS(opt.optimize(data), InvalidMarketData);
+    CHECK_THROWS_AS(opt.optimize(data), PortoptError);
 }
 
 TEST_CASE("MVOptimizer — dimension mismatch throws", "[mvo][validation]") {
     MarketData data = twoAssetData();
     data.expected_returns = Vector::Zero(3); // wrong size
     MVOptimizer opt;
-    CHECK_THROWS_AS(opt.optimize(data), std::invalid_argument);
+    CHECK_THROWS_AS(opt.optimize(data), InvalidMarketData);
 }

@@ -9,12 +9,81 @@
  */
 
 #include <Eigen/Dense>
+#include <atomic>
+#include <chrono>
+#include <memory>
 #include <string>
 #include <vector>
 #include <optional>
 #include <stdexcept>
 
 namespace portopt {
+
+// ── Typed exception hierarchy (C4) ───────────────────────────────────────────
+//
+// All library failures derive from PortoptError. Each subclass carries a
+// stable machine-readable reason code in addition to the human-readable
+// message. The codes are intended to be consumed by MCP wrappers / LLM
+// agents so they can recover from infeasibility, validate inputs, or
+// re-prompt for a different configuration without parsing error strings.
+
+class PortoptError : public std::runtime_error {
+public:
+    PortoptError(std::string code, std::string message)
+        : std::runtime_error(std::move(message)), code_(std::move(code)) {}
+    const std::string& code() const noexcept { return code_; }
+private:
+    std::string code_;
+};
+
+class InvalidMarketData : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+class InvalidParameters : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+class InfeasibleProblem : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+class SolverDidNotConverge : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+class SolverCancelled : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+class SolverTimeout : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+// ── Cancellation token (C5) ──────────────────────────────────────────────────
+//
+// A lightweight, copyable handle that wraps a shared atomic flag. The
+// FISTA inner loop checks `isCancellationRequested()` between iterations.
+// `SolverConfig` and `MVOParameters` accept an optional CancellationToken
+// plus a timeout_ms; when either trips, the solver throws SolverCancelled
+// / SolverTimeout with the corresponding reason code.
+class CancellationToken {
+public:
+    CancellationToken() : flag_(std::make_shared<std::atomic<bool>>(false)) {}
+    void cancel() { if (flag_) flag_->store(true, std::memory_order_relaxed); }
+    bool isCancellationRequested() const {
+        return flag_ && flag_->load(std::memory_order_relaxed);
+    }
+    void reset() { if (flag_) flag_->store(false, std::memory_order_relaxed); }
+private:
+    std::shared_ptr<std::atomic<bool>> flag_;
+};
 
 // ── Convenience aliases ──────────────────────────────────────────────────────
 using Matrix = Eigen::MatrixXd;
@@ -122,28 +191,38 @@ struct PortfolioConstraints {
 
     void validate(int n) const {
         if (lower_bounds.size() != n || upper_bounds.size() != n)
-            throw std::invalid_argument("Constraint dimension mismatch");
+            throw InvalidParameters("constraint_dimension_mismatch",
+                                     "Constraint dimension mismatch");
         if ((lower_bounds.array() > upper_bounds.array()).any())
-            throw std::invalid_argument("lower_bounds must be <= upper_bounds");
+            throw InvalidParameters(
+                "lower_exceeds_upper_bound",
+                "lower_bounds must be <= upper_bounds");
         // Budget feasibility: sum(lb) ≤ budget ≤ sum(ub)
         double lb_sum = lower_bounds.sum();
         double ub_sum = upper_bounds.sum();
         if (budget < lb_sum - 1e-9 || budget > ub_sum + 1e-9)
-            throw std::invalid_argument(
+            throw InfeasibleProblem(
+                "budget_outside_bounds",
                 "Infeasible: budget=" + std::to_string(budget) +
                 " not in [sum(lb)=" + std::to_string(lb_sum) +
                 ", sum(ub)=" + std::to_string(ub_sum) + "]");
         if (current_weights.size() != 0 && current_weights.size() != n)
-            throw std::invalid_argument("current_weights size mismatch");
+            throw InvalidParameters("current_weights_size_mismatch",
+                                     "current_weights size mismatch");
         if (turnover_penalty < 0.0)
-            throw std::invalid_argument("turnover_penalty must be >= 0");
+            throw InvalidParameters("negative_turnover_penalty",
+                                     "turnover_penalty must be >= 0");
         for (const auto& g : groups) {
             if (g.coefficients.size() != n)
-                throw std::invalid_argument(
-                    "Group constraint \"" + g.description + "\": coefficient size mismatch");
+                throw InvalidParameters(
+                    "group_coefficient_size_mismatch",
+                    "Group constraint \"" + g.description +
+                    "\": coefficient size mismatch");
             if (g.lower > g.upper)
-                throw std::invalid_argument(
-                    "Group constraint \"" + g.description + "\": lower > upper");
+                throw InvalidParameters(
+                    "group_lower_exceeds_upper",
+                    "Group constraint \"" + g.description +
+                    "\": lower > upper");
         }
     }
 };
@@ -191,6 +270,14 @@ struct MVOParameters {
     /// path is not applicable, falls back to the log-λ sweep + golden-
     /// section refinement.
     bool   use_tangent_reformulation{true};
+
+    // ── C5: cancellation + timeout ───────────────────────────────────────────
+    /// Caller-supplied cancellation handle. If set, the FISTA inner loop
+    /// polls it between iterations and throws SolverCancelled on request.
+    CancellationToken cancellation;
+    /// Soft deadline in milliseconds; 0 disables. When elapsed solver
+    /// time exceeds this, the inner loop throws SolverTimeout.
+    double timeout_ms{0.0};
 
     PortfolioConstraints constraints;
 };

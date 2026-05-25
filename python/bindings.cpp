@@ -37,6 +37,38 @@ static MarketData makeMarketData(
 PYBIND11_MODULE(_portopt, m) {
     m.doc() = "Portfolio optimisation library — MVO and Black-Litterman";
 
+    // ── Typed exception hierarchy (C4) ────────────────────────────────────────
+    // Register each portopt error class with pybind11 so Python callers can
+    // catch them as `portopt.PortoptError`, `portopt.InfeasibleProblem`,
+    // etc. The `.code` attribute carries the stable machine-readable
+    // reason code defined alongside each throw site.
+    static py::exception<PortoptError>         ex_base(m, "PortoptError");
+    static py::exception<InvalidMarketData>    ex_imd (m, "InvalidMarketData",       ex_base.ptr());
+    static py::exception<InvalidParameters>    ex_ip  (m, "InvalidParameters",       ex_base.ptr());
+    static py::exception<InfeasibleProblem>    ex_inf (m, "InfeasibleProblem",       ex_base.ptr());
+    static py::exception<SolverDidNotConverge> ex_nc  (m, "SolverDidNotConverge",    ex_base.ptr());
+    static py::exception<SolverCancelled>      ex_can (m, "SolverCancelled",         ex_base.ptr());
+    static py::exception<SolverTimeout>        ex_to  (m, "SolverTimeout",           ex_base.ptr());
+    py::register_exception_translator([](std::exception_ptr p) {
+        if (!p) return;
+        try { std::rethrow_exception(p); }
+        catch (const SolverTimeout&        e) { PyErr_SetString(ex_to.ptr(),  e.what()); }
+        catch (const SolverCancelled&      e) { PyErr_SetString(ex_can.ptr(), e.what()); }
+        catch (const SolverDidNotConverge& e) { PyErr_SetString(ex_nc.ptr(),  e.what()); }
+        catch (const InfeasibleProblem&    e) { PyErr_SetString(ex_inf.ptr(), e.what()); }
+        catch (const InvalidParameters&    e) { PyErr_SetString(ex_ip.ptr(),  e.what()); }
+        catch (const InvalidMarketData&    e) { PyErr_SetString(ex_imd.ptr(), e.what()); }
+        catch (const PortoptError&         e) { PyErr_SetString(ex_base.ptr(),e.what()); }
+    });
+
+    // ── CancellationToken (C5) ────────────────────────────────────────────────
+    py::class_<CancellationToken>(m, "CancellationToken")
+        .def(py::init<>())
+        .def("cancel", &CancellationToken::cancel)
+        .def("reset",  &CancellationToken::reset)
+        .def("is_cancellation_requested",
+             &CancellationToken::isCancellationRequested);
+
     // ── Logging ───────────────────────────────────────────────────────────────
     py::enum_<log::Level>(m, "LogLevel")
         .value("Trace",    log::Level::Trace)
@@ -88,6 +120,10 @@ PYBIND11_MODULE(_portopt, m) {
         .def_readwrite("current_weights",     &PortfolioConstraints::current_weights)
         .def_readwrite("turnover_penalty",    &PortfolioConstraints::turnover_penalty)
         .def_readwrite("groups",              &PortfolioConstraints::groups)
+        .def_readwrite("tracking_error_limit",
+                       &PortfolioConstraints::tracking_error_limit)
+        .def_readwrite("gross_exposure_limit",
+                       &PortfolioConstraints::gross_exposure_limit)
         .def_static("long_only", &PortfolioConstraints::longOnly, py::arg("n"))
         .def_static("with_shorts", &PortfolioConstraints::withShorts,
                     py::arg("n"), py::arg("max_short") = 1.0)
@@ -102,13 +138,20 @@ PYBIND11_MODULE(_portopt, m) {
     // ── MVOParameters ─────────────────────────────────────────────────────────
     py::class_<MVOParameters>(m, "MVOParameters")
         .def(py::init<>())
-        .def_readwrite("risk_aversion",     &MVOParameters::risk_aversion)
-        .def_readwrite("frontier_points",   &MVOParameters::frontier_points)
-        .def_readwrite("min_risk_aversion", &MVOParameters::min_risk_aversion)
-        .def_readwrite("max_risk_aversion", &MVOParameters::max_risk_aversion)
-        .def_readwrite("risk_free_rate",    &MVOParameters::risk_free_rate)
-        .def_readwrite("group_penalty",     &MVOParameters::group_penalty)
-        .def_readwrite("constraints",       &MVOParameters::constraints);
+        .def_readwrite("risk_aversion",            &MVOParameters::risk_aversion)
+        .def_readwrite("frontier_points",          &MVOParameters::frontier_points)
+        .def_readwrite("min_risk_aversion",        &MVOParameters::min_risk_aversion)
+        .def_readwrite("max_risk_aversion",        &MVOParameters::max_risk_aversion)
+        .def_readwrite("risk_free_rate",           &MVOParameters::risk_free_rate)
+        .def_readwrite("group_penalty",            &MVOParameters::group_penalty)
+        .def_readwrite("hard_group_constraints",   &MVOParameters::hard_group_constraints)
+        .def_readwrite("group_tolerance",          &MVOParameters::group_tolerance)
+        .def_readwrite("use_tangent_reformulation",&MVOParameters::use_tangent_reformulation)
+        .def_readwrite("linear_transaction_cost",  &MVOParameters::linear_transaction_cost)
+        .def_readwrite("quadratic_transaction_cost",&MVOParameters::quadratic_transaction_cost)
+        .def_readwrite("cancellation",             &MVOParameters::cancellation)
+        .def_readwrite("timeout_ms",               &MVOParameters::timeout_ms)
+        .def_readwrite("constraints",              &MVOParameters::constraints);
 
     // ── ViewConfidenceMode ────────────────────────────────────────────────────
     py::enum_<ViewConfidenceMode>(m, "ViewConfidenceMode")

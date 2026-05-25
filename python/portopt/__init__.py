@@ -45,6 +45,16 @@ from ._portopt import (  # noqa: F401
     init_logging,
     set_log_level,
     add_file_log,
+    # Typed exceptions (C4)
+    PortoptError,
+    InvalidMarketData,
+    InvalidParameters,
+    InfeasibleProblem,
+    SolverDidNotConverge,
+    SolverCancelled,
+    SolverTimeout,
+    # Cancellation (C5)
+    CancellationToken,
     # Data types
     Asset,
     MarketData,

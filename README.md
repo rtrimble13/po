@@ -8,16 +8,20 @@ A high-performance C++ library for portfolio optimisation, with Python bindings,
 |---|---|
 | **Core algorithms** | MVO, Black-Litterman (variance- and Idzorek-mode confidences) |
 | **PM-friendly portfolios** | Min-variance, max-Sharpe, target-volatility, target-return |
+| **Convenience portfolios** | Equal-weight, inverse-variance, inverse-volatility, market-cap, equal-risk-contribution (risk parity) |
 | **Constraints** | Box bounds, budget (incl. dollar-neutral & 130/30), fix/forbid assets, group caps, L2 turnover penalty |
-| **Estimation** | Sample / Ledoit-Wolf / OAS / linear shrinkage from returns CSV |
+| **Estimation** | Sample / Ledoit-Wolf / OAS / linear / EWMA shrinkage from returns CSV |
 | **Metrics** | Sharpe (rf-aware), risk contributions, diversification ratio, effective N, tracking error, IR, active share, beta, turnover |
+| **Solver diagnostics** | Primal residual, KKT residual, dual estimate ν̂ — reported on every result |
+| **Audit trail** | Library version + input/params FNV-1a hash stamped on every result (reproducibility) |
+| **Black-Litterman diagnostics** | Pick-matrix rank / smallest singular value, posterior condition number |
 | **Language** | C++17 library; Python bindings via pybind11 |
-| **CLI** | Cross-platform binary; ASCII-fallback console for Windows |
-| **Input formats** | JSON / CSV (market data); JSON / TOML (parameters); returns CSV |
-| **Output formats** | Console table, JSON, CSV; notional $ exposure; "explain" mode for active bounds |
+| **CLI** | Cross-platform binary (`po`); ASCII-fallback console for Windows |
+| **Input formats** | JSON / CSV (market data); JSON / TOML (parameters); returns CSV; **JSON strings** for in-memory MCP use |
+| **Output formats** | Console table, JSON (full / summary), CSV; notional $ exposure; "explain" mode for active bounds; pandas-free frontier records |
 | **Logging** | spdlog-backed, configurable level + rotating file sink |
 | **Diagnostics** | Jupyter notebook template with automatic report generation |
-| **Tests** | Catch2 test suite (QP solver, MVO, BL, estimation, IO, integration) |
+| **Tests** | Catch2 (C++) + pytest (Python MCP surface) — 107 C++ test cases, 7 Python test cases |
 
 ## Quick start
 
@@ -125,8 +129,16 @@ import portopt
 
 portopt.init_logging(portopt.LogLevel.Info)
 
-# Load data — sets benchmark_weights and risk_free_rate if present in JSON
+# Load data — from file…
 data = portopt.read_market_data("assets.json")
+# …or entirely inline (MCP-friendly):
+data = portopt.market_data_from_dict({
+    "assets": [{"ticker": "AAPL"}, {"ticker": "MSFT"}],
+    "covariance": [[0.04, 0.01], [0.01, 0.09]],
+    "risk_free_rate": 0.04,
+})
+import numpy as np
+data.expected_returns = np.array([0.15, 0.12])
 
 # MVO with budget, turnover penalty, and per-asset caps
 params = portopt.MVOParameters()
@@ -174,6 +186,24 @@ data2 = portopt.estimation.from_returns(
     ["A", "B", "C", "D", "E"], R, periods_per_year=252,
     shrinkage="ledoit-wolf",
 )
+
+# EWMA / RiskMetrics covariance
+S_ewma = portopt.estimation.ewma_covariance(R, 0.94, 252)
+
+# Convenience portfolios — no optimisation required
+w_eq  = portopt.portfolios.equal_weight(5)
+w_iv  = portopt.portfolios.inverse_variance(S_ewma)
+w_erc = portopt.portfolios.equal_risk_contribution(S_ewma)   # risk parity
+
+# Diagnostics on the optimisation result
+print(f"KKT residual:     {result.kkt_residual:.3e}")
+print(f"Library version:  {result.library_version}")
+print(f"Input  hash:      {result.input_hash}")
+print(f"Params hash:      {result.params_hash}")
+
+# Pandas-free frontier output (suitable for MCP responses)
+frontier = opt.efficient_frontier(data)
+records = frontier.to_records()       # list[dict] — no pandas import needed
 ```
 
 See `examples/example_mvo.py`, `examples/example_bl.py`,

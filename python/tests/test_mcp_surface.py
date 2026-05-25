@@ -33,10 +33,20 @@ def test_mvo_params_from_dict_round_trip():
     spec = {
         "mvo": {
             "risk_aversion": 2.5,
+            "risk_free_rate": 0.0,
+            "risk_free_rate_is_set": True,
+            "hard_group_constraints": True,
+            "group_tolerance": 1e-6,
+            "use_tangent_reformulation": False,
+            "linear_transaction_cost": [0.001, 0.002, 0.003],
+            "quadratic_transaction_cost": [0.01, 0.02, 0.03],
+            "timeout_ms": 1000.0,
             "constraints": {
                 "lower_bounds": [0.0, 0.0, 0.0],
                 "upper_bounds": [0.4, 0.4, 0.4],
                 "budget": 1.0,
+                "tracking_error_limit": 0.05,
+                "gross_exposure_limit": 1.2,
             },
         }
     }
@@ -49,6 +59,11 @@ def test_mvo_params_from_dict_round_trip():
     back = portopt.mvo_params_to_dict(p)
     assert back["risk_aversion"] == 2.5
     assert back["constraints"]["upper_bounds"] == [0.4, 0.4, 0.4]
+    assert back["risk_free_rate_is_set"] is True
+    assert back["hard_group_constraints"] is True
+    assert back["use_tangent_reformulation"] is False
+    assert back["constraints"]["tracking_error_limit"] == 0.05
+    assert back["constraints"]["gross_exposure_limit"] == 1.2
 
 
 def test_bl_params_from_dict():
@@ -88,6 +103,24 @@ def test_market_data_from_dict_drives_full_optimisation():
     assert result.library_version
     assert result.input_hash
     assert result.params_hash
+
+
+def test_market_data_to_dict_round_trips_optional_fields():
+    md = portopt.market_data_from_dict({
+        "assets": [{"ticker": "A", "currency": "USD"},
+                   {"ticker": "B", "currency": "EUR"}],
+        "covariance": [[0.04, 0.01], [0.01, 0.09]],
+        "expected_returns": [0.1, 0.12],
+        "market_weights": [0.6, 0.4],
+        "benchmark_weights": [0.5, 0.5],
+        "risk_free_rate": 0.01,
+    })
+    out = portopt.market_data_to_dict(md)
+    assert out["assets"][0]["currency"] == "USD"
+    assert out["assets"][1]["currency"] == "EUR"
+    assert out["expected_returns"] == [0.1, 0.12]
+    assert out["market_weights"] == [0.6, 0.4]
+    assert out["benchmark_weights"] == [0.5, 0.5]
 
 
 def test_frontier_to_records_no_pandas():
@@ -161,3 +194,14 @@ def test_portfolios_module_round_trip():
 
     iv = portopt.portfolios.inverse_variance(md.covariance)
     assert iv[2] > iv[0] > iv[1]   # variance ordering: C(0.01) < A(0.04) < B(0.09)
+
+
+def test_tool_manifest_uses_valid_object_input_schemas():
+    if not hasattr(portopt, "schemas"):
+        pytest.skip("pydantic schemas not installed")
+    manifest = portopt.schemas.tool_manifest()
+    mvo_schema = manifest["optimize_mvo"]["input_schema"]
+    assert mvo_schema["type"] == "object"
+    assert "properties" in mvo_schema
+    assert set(mvo_schema["required"]) == {"data", "params"}
+    assert manifest["target_volatility"]["input_schema"]["required"] == ["data", "target"]

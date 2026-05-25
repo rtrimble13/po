@@ -90,7 +90,8 @@ def walk_forward(
         to 1 (or to the user's chosen budget).
     transaction_cost
         Per-unit-traded linear cost; subtracted from the portfolio's
-        period-of-rebalance return as `cost * turnover`.
+        period-of-rebalance return as `cost * (2 * turnover)` to account
+        for both buy and sell legs.
     benchmark_returns
         Optional benchmark return series aligned with `returns` — used
         for tracking-error / IR reporting in `BacktestResult.summary()`.

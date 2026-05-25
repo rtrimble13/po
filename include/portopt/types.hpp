@@ -142,8 +142,6 @@ struct PortfolioConstraints {
 
     // ── Gross-exposure / leverage cap (B2) ────────────────────────────────────
     /// Maximum Σ|w_i| ≤ gross_exposure_limit. 0 = disabled.
-    /// Enforced via per-asset positive/negative splitting; relies on the
-    /// existing box bounds, so use with `allow_short_selling = true`.
     /// Approximated via a linear group constraint Σ s_i w_i ≤ L where
     /// s_i = sign(w_i^current) (a fixed-point iteration is run if no
     /// current_weights are supplied).
@@ -239,6 +237,9 @@ struct MVOParameters {
     /// Risk-free rate (annualised). Used in Sharpe calculation: (μ_p − r_f)/σ.
     /// If expected_returns are already excess returns, leave this at 0.
     double risk_free_rate{0.0};
+    /// If true, `risk_free_rate` overrides MarketData::risk_free_rate even
+    /// when the override value is exactly 0.0.
+    bool   risk_free_rate_is_set{false};
 
     /// Penalty weight on group-constraint violations (soft enforcement).
     /// Set to 0 to disable group constraints, larger values enforce more strictly.

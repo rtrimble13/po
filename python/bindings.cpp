@@ -40,8 +40,8 @@ PYBIND11_MODULE(_portopt, m) {
     // ── Typed exception hierarchy (C4) ────────────────────────────────────────
     // Register each portopt error class with pybind11 so Python callers can
     // catch them as `portopt.PortoptError`, `portopt.InfeasibleProblem`,
-    // etc. The `.code` attribute carries the stable machine-readable
-    // reason code defined alongside each throw site.
+    // etc. The machine-readable reason code is prefixed into str(e) as
+    // `[code] message` by the translator below.
     static py::exception<PortoptError>         ex_base(m, "PortoptError");
     static py::exception<InvalidMarketData>    ex_imd (m, "InvalidMarketData",       ex_base.ptr());
     static py::exception<InvalidParameters>    ex_ip  (m, "InvalidParameters",       ex_base.ptr());
@@ -149,6 +149,7 @@ PYBIND11_MODULE(_portopt, m) {
         .def_readwrite("min_risk_aversion",        &MVOParameters::min_risk_aversion)
         .def_readwrite("max_risk_aversion",        &MVOParameters::max_risk_aversion)
         .def_readwrite("risk_free_rate",           &MVOParameters::risk_free_rate)
+        .def_readwrite("risk_free_rate_is_set",    &MVOParameters::risk_free_rate_is_set)
         .def_readwrite("group_penalty",            &MVOParameters::group_penalty)
         .def_readwrite("hard_group_constraints",   &MVOParameters::hard_group_constraints)
         .def_readwrite("group_tolerance",          &MVOParameters::group_tolerance)

@@ -176,12 +176,24 @@ def mvo_params_to_dict(p):
         "min_risk_aversion": p.min_risk_aversion,
         "max_risk_aversion": p.max_risk_aversion,
         "risk_free_rate":    p.risk_free_rate,
+        "risk_free_rate_is_set": p.risk_free_rate_is_set,
         "group_penalty":     p.group_penalty,
+        "hard_group_constraints": p.hard_group_constraints,
+        "group_tolerance":   p.group_tolerance,
+        "use_tangent_reformulation": p.use_tangent_reformulation,
+        "linear_transaction_cost": list(p.linear_transaction_cost)
+                                   if p.linear_transaction_cost.size > 0 else [],
+        "quadratic_transaction_cost": list(p.quadratic_transaction_cost)
+                                      if p.quadratic_transaction_cost.size > 0 else [],
+        "timeout_ms": p.timeout_ms,
         "constraints": {
             "lower_bounds":     list(p.constraints.lower_bounds),
             "upper_bounds":     list(p.constraints.upper_bounds),
+            "allow_short_selling": p.constraints.allow_short_selling,
             "budget":           p.constraints.budget,
             "turnover_penalty": p.constraints.turnover_penalty,
+            "tracking_error_limit": p.constraints.tracking_error_limit,
+            "gross_exposure_limit": p.constraints.gross_exposure_limit,
             "current_weights":  list(p.constraints.current_weights)
                                 if p.constraints.current_weights.size > 0 else [],
             "groups": [
@@ -229,10 +241,17 @@ def market_data_to_dict(d):
                 "expected_return": a.expected_return,
                 "market_cap":      a.market_cap,
                 "sector":          a.sector,
+                "currency":        a.currency,
             }
             for a in d.assets
         ],
         "covariance":     [list(row) for row in d.covariance],
         "risk_free_rate": d.risk_free_rate,
     }
+    if d.expected_returns is not None:
+        out["expected_returns"] = list(d.expected_returns)
+    if d.market_weights is not None:
+        out["market_weights"] = list(d.market_weights)
+    if d.benchmark_weights is not None:
+        out["benchmark_weights"] = list(d.benchmark_weights)
     return out

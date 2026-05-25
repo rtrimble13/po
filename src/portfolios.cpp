@@ -108,19 +108,18 @@ Vector equalRiskContribution(const Matrix& covariance,
     Vector w = Vector::Constant(n, 1.0 / static_cast<double>(n));
     for (int iter = 0; iter < max_iters; ++iter) {
         const Vector w_prev = w;
+        Vector sigma_w = covariance * w;
+        const double c = w.dot(sigma_w) / static_cast<double>(n);
         for (int i = 0; i < n; ++i) {
             const double b = covariance(i, i);
             // a = (Σw)_i − Σ_ii · w_i (cross-term contribution)
-            const double Sigma_w_i = covariance.row(i).dot(w);
-            const double a = Sigma_w_i - b * w[i];
-            // Target c — use the current per-asset average RC as the
-            // shared budget so the iteration is scale-invariant.
-            double c = 0.0;
-            for (int j = 0; j < n; ++j) c += w[j] * covariance.row(j).dot(w);
-            c /= static_cast<double>(n);
+            const double a = sigma_w[i] - b * w[i];
             const double w_new =
                 (-a + std::sqrt(a * a + 4.0 * b * c)) / (2.0 * b);
+            const double delta = w_new - w[i];
             w[i] = w_new;
+            if (std::abs(delta) > 0.0)
+                sigma_w.noalias() += covariance.col(i) * delta;
         }
         // Renormalise to budget = 1.
         const double total = w.sum();
@@ -425,6 +424,9 @@ Vector minimumCVaR(const Matrix& returns,
     if (T < 2)
         throw std::invalid_argument(
             "minimumCVaR: need at least 2 sample periods");
+    if (n <= 0)
+        throw std::invalid_argument(
+            "minimumCVaR: returns must have at least one asset column");
 
     if (lower_bounds.size() != n) lower_bounds = Vector::Zero(n);
     if (upper_bounds.size() != n) upper_bounds = Vector::Ones(n);

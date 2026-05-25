@@ -153,6 +153,7 @@ class MVOParametersSchema(BaseModel):
     min_risk_aversion:         float = 0.01
     max_risk_aversion:         float = 100.0
     risk_free_rate:            float = 0.0
+    risk_free_rate_is_set:     bool  = False
     group_penalty:             float = 1e3
     hard_group_constraints:    bool  = False
     group_tolerance:           float = 1e-6
@@ -171,6 +172,7 @@ class MVOParametersSchema(BaseModel):
         p.min_risk_aversion         = self.min_risk_aversion
         p.max_risk_aversion         = self.max_risk_aversion
         p.risk_free_rate            = self.risk_free_rate
+        p.risk_free_rate_is_set     = self.risk_free_rate_is_set
         p.group_penalty             = self.group_penalty
         p.hard_group_constraints    = self.hard_group_constraints
         p.group_tolerance           = self.group_tolerance
@@ -278,45 +280,120 @@ def tool_manifest() -> dict:
     auto-publish tool definitions. The schemas are produced by
     `model_json_schema()` so they're already JSON-Schema-Draft-2020-12.
     """
+    mkt = MarketDataSchema.model_json_schema()
+    mvo = MVOParametersSchema.model_json_schema()
+    blp = BlackLittermanParametersSchema.model_json_schema()
+    opt = OptimizationResultSchema.model_json_schema()
     return {
         "optimize_mvo": {
             "description":
                 "Run Mean-Variance Optimisation over the supplied market data "
                 "with the given parameters. Returns the optimal weights, "
                 "convergence diagnostics, and full portfolio metrics.",
-            "input_schema":  {
-                "data":   MarketDataSchema.model_json_schema(),
-                "params": MVOParametersSchema.model_json_schema(),
+            "input_schema": {
+                "type": "object",
+                "properties": {"data": mkt, "params": mvo},
+                "required": ["data", "params"],
+                "additionalProperties": False,
             },
-            "output_schema": OptimizationResultSchema.model_json_schema(),
+            "output_schema": opt,
         },
         "optimize_black_litterman": {
             "description":
                 "Run Black-Litterman optimisation. Combines the equilibrium "
                 "market prior with investor views to produce posterior expected "
                 "returns and the corresponding MVO portfolio.",
-            "input_schema":  {
-                "data":   MarketDataSchema.model_json_schema(),
-                "params": BlackLittermanParametersSchema.model_json_schema(),
+            "input_schema": {
+                "type": "object",
+                "properties": {"data": mkt, "params": blp},
+                "required": ["data", "params"],
+                "additionalProperties": False,
             },
-            "output_schema": OptimizationResultSchema.model_json_schema(),
+            "output_schema": opt,
         },
-        "min_variance":   {"description":
-            "Minimum-variance portfolio (λ → 0)."},
-        "max_sharpe":     {"description":
-            "Maximum-Sharpe (tangency) portfolio."},
-        "target_volatility": {"description":
-            "Portfolio with realised volatility ≈ target."},
-        "target_return":  {"description":
-            "Portfolio with expected return ≈ target."},
-        "build_efficient_frontier": {"description":
-            "Sweep λ over [min, max] and return the full efficient frontier."},
-        "estimate_covariance": {"description":
-            "Estimate Σ from a returns matrix via sample / Ledoit-Wolf / OAS."},
-        "summarise_portfolio": {"description":
-            "Compute metrics (Sharpe, TE, IR, risk contributions…) for "
-            "user-supplied weights and market data."},
-        "validate_market_data": {"description":
-            "Validate that MarketData is well-formed (dimensions, PSD-ness, "
-            "etc.) without running an optimisation."},
+        "min_variance": {
+            "description": "Minimum-variance portfolio (λ → 0).",
+            "input_schema": {
+                "type": "object",
+                "properties": {"data": mkt, "params": mvo},
+                "required": ["data"],
+                "additionalProperties": False,
+            },
+            "output_schema": opt,
+        },
+        "max_sharpe": {
+            "description": "Maximum-Sharpe (tangency) portfolio.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"data": mkt, "params": mvo},
+                "required": ["data"],
+                "additionalProperties": False,
+            },
+            "output_schema": opt,
+        },
+        "target_volatility": {
+            "description": "Portfolio with realised volatility ≈ target.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"data": mkt, "target": {"type": "number"}, "params": mvo},
+                "required": ["data", "target"],
+                "additionalProperties": False,
+            },
+            "output_schema": opt,
+        },
+        "target_return": {
+            "description": "Portfolio with expected return ≈ target.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"data": mkt, "target": {"type": "number"}, "params": mvo},
+                "required": ["data", "target"],
+                "additionalProperties": False,
+            },
+            "output_schema": opt,
+        },
+        "build_efficient_frontier": {
+            "description": "Sweep λ over [min, max] and return the full efficient frontier.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"data": mkt, "params": mvo},
+                "required": ["data"],
+                "additionalProperties": False,
+            },
+        },
+        "estimate_covariance": {
+            "description": "Estimate Σ from a returns matrix via sample / Ledoit-Wolf / OAS.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "tickers": {"type": "array", "items": {"type": "string"}},
+                    "returns": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "periods_per_year": {"type": "number"},
+                    "shrinkage": {"type": "string"},
+                },
+                "required": ["tickers", "returns"],
+                "additionalProperties": False,
+            },
+        },
+        "summarise_portfolio": {
+            "description": "Compute metrics (Sharpe, TE, IR, risk contributions…) for user-supplied weights and market data.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "data": mkt,
+                    "weights": {"type": "array", "items": {"type": "number"}},
+                    "risk_free_rate": {"type": "number"},
+                },
+                "required": ["data", "weights"],
+                "additionalProperties": False,
+            },
+        },
+        "validate_market_data": {
+            "description": "Validate that MarketData is well-formed (dimensions, PSD-ness, etc.) without running an optimisation.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"data": mkt},
+                "required": ["data"],
+                "additionalProperties": False,
+            },
+        },
     }

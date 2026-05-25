@@ -20,15 +20,15 @@ MVOptimizer::MVOptimizer(MVOParameters params)
     solver_cfg_.use_nesterov   = true;
 }
 
-// Resolve the effective risk-free rate: an explicit non-zero
-// MVOParameters value overrides whatever is on the MarketData.
-// A zero in the params field is treated as "not set" — the data value
-// then applies. Used by both `optimizeFor` and `maxSharpePortfolio`
-// so the two call sites cannot drift.
+// Resolve the effective risk-free rate: an explicit override in
+// MVOParameters (including an override to exactly 0.0) wins over
+// MarketData::risk_free_rate. For backward compatibility, a non-zero
+// MVOParameters::risk_free_rate also implies "override".
 static double effectiveRiskFreeRate(const MVOParameters& params,
                                     const MarketData& data) {
-    return (params.risk_free_rate != 0.0) ? params.risk_free_rate
-                                          : data.risk_free_rate;
+    return (params.risk_free_rate_is_set || params.risk_free_rate != 0.0)
+               ? params.risk_free_rate
+               : data.risk_free_rate;
 }
 
 // ── Numerical tolerances (A9) ────────────────────────────────────────────────
@@ -90,12 +90,25 @@ static std::string paramsHash(const MVOParameters& p) {
     std::ostringstream os;
     os.precision(16);
     os << "lam=" << p.risk_aversion
+       << " npts=" << p.frontier_points
+       << " lam_min=" << p.min_risk_aversion
+       << " lam_max=" << p.max_risk_aversion
        << " rf="  << p.risk_free_rate
+       << " rf_set=" << (p.risk_free_rate_is_set ? 1 : 0)
        << " grp_pen=" << p.group_penalty
+       << " grp_hard=" << (p.hard_group_constraints ? 1 : 0)
+       << " grp_tol=" << p.group_tolerance
+       << " tangent=" << (p.use_tangent_reformulation ? 1 : 0)
+       << " timeout_ms=" << p.timeout_ms
        << " budget=" << p.constraints.budget
-       << " kappa="  << p.constraints.turnover_penalty;
+       << " kappa="  << p.constraints.turnover_penalty
+       << " allow_short=" << (p.constraints.allow_short_selling ? 1 : 0)
+       << " te_limit=" << p.constraints.tracking_error_limit
+       << " gross_limit=" << p.constraints.gross_exposure_limit;
     writeVec(os, p.constraints.lower_bounds);
     writeVec(os, p.constraints.upper_bounds);
+    writeVec(os, p.linear_transaction_cost);
+    writeVec(os, p.quadratic_transaction_cost);
     if (p.constraints.current_weights.size() > 0)
         writeVec(os, p.constraints.current_weights);
     for (const auto& g : p.constraints.groups) {
@@ -397,6 +410,37 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
                 cons.tracking_error_limit * cons.tracking_error_limit;
             if (mu_te == 0.0 && te2 <= te_target2 + 1e-12) {
                 // Unconstrained TE is already within limit — no work needed.
+            } else if (mu_te > 0.0 && te2 <= te_target2 - 1e-9) {
+                // If TE is now comfortably slack, allow μ_te to decrease.
+                auto qp_zero = solve_once(0.0, build_extras());
+                const Vector a0 = qp_zero.x - *data.benchmark_weights;
+                const double te2_zero = a0.dot(data.covariance * a0);
+                if (te2_zero <= te_target2 + 1e-9) {
+                    mu_te = 0.0;
+                    qp = qp_zero;
+                    changed = true;
+                    ++te_iters;
+                } else {
+                    double lo = 0.0, hi = mu_te;
+                    for (int k = 0; k < 30; ++k) {
+                        const double mid = 0.5 * (lo + hi);
+                        auto qp_mid = solve_once(mid, build_extras());
+                        const Vector a_mid = qp_mid.x - *data.benchmark_weights;
+                        const double t_mid = a_mid.dot(data.covariance * a_mid);
+                        if (t_mid <= te_target2) {
+                            hi = mid;
+                            qp = qp_mid;
+                        } else {
+                            lo = mid;
+                        }
+                        if (hi - lo < 1e-4 * std::max(1.0, hi)) break;
+                    }
+                    if (hi < mu_te) {
+                        mu_te = hi;
+                        changed = true;
+                        ++te_iters;
+                    }
+                }
             } else if (te2 > te_target2 + 1e-9) {
                 // Bisect μ_te ∈ [mu_te, mu_hi] until TE meets target.
                 double lo = mu_te, hi = std::max(1.0, mu_te) * 1024.0;

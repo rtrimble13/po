@@ -317,6 +317,22 @@ TEST_CASE("MVOParameters.risk_free_rate overrides MarketData.risk_free_rate",
     CHECK(sh_p == Approx(expected).margin(1e-9));
 }
 
+TEST_CASE("Risk-free-rate override can be explicitly set to zero",
+          "[mvo][risk_free_rate]") {
+    auto data = fiveAssets();
+    data.risk_free_rate = 0.02;
+
+    MVOParameters p;
+    p.constraints = PortfolioConstraints::longOnly(5);
+    p.risk_aversion = 2.0;
+    p.risk_free_rate = 0.0;
+    p.risk_free_rate_is_set = true;
+
+    auto r = MVOptimizer(p).optimize(data);
+    const double expected = r.metrics.expected_return / r.metrics.volatility;
+    CHECK(r.metrics.sharpe_ratio == Approx(expected).margin(1e-9));
+}
+
 // ── A2: KKT residual is exposed on OptimizationResult ─────────────────────────
 
 TEST_CASE("OptimizationResult exposes KKT residual",

@@ -119,3 +119,65 @@ TEST_CASE("equalRiskContribution rejects malformed inputs",
     Matrix nonsquare = Matrix::Zero(3, 4);
     CHECK_THROWS(equalRiskContribution(nonsquare));
 }
+
+// ── B4: Hierarchical Risk Parity ─────────────────────────────────────────────
+
+TEST_CASE("hierarchicalRiskParity sums to 1 and is long-only",
+          "[portfolios][hrp][b4]") {
+    Matrix S(4, 4);
+    S << 0.04, 0.02, 0.005, 0.001,
+         0.02, 0.05, 0.006, 0.002,
+         0.005,0.006,0.03, 0.015,
+         0.001,0.002,0.015,0.025;
+    auto w = hierarchicalRiskParity(S);
+    REQUIRE(w.size() == 4);
+    CHECK(w.sum() == Approx(1.0).margin(1e-9));
+    for (int i = 0; i < 4; ++i) {
+        CHECK(w[i] > 0.0);
+        CHECK(w[i] < 1.0);
+    }
+}
+
+TEST_CASE("hierarchicalRiskParity prefers low-variance assets in equal-corr Σ",
+          "[portfolios][hrp][b4]") {
+    // Identical correlation, different variances — lowest-vol should win.
+    Matrix S(3, 3);
+    S << 0.01, 0.0, 0.0,
+         0.0,  0.04, 0.0,
+         0.0,  0.0,  0.09;
+    auto w = hierarchicalRiskParity(S);
+    CHECK(w[0] > w[1]);
+    CHECK(w[1] > w[2]);
+}
+
+// ── B15: Maximum diversification ─────────────────────────────────────────────
+
+TEST_CASE("maximumDiversification returns long-only normalised weights",
+          "[portfolios][maxdiv]") {
+    Matrix S(3, 3);
+    S << 0.04, 0.01, 0.005,
+         0.01, 0.05, 0.003,
+         0.005,0.003,0.02;
+    auto w = maximumDiversification(S);
+    CHECK(w.sum() == Approx(1.0).margin(1e-9));
+    for (int i = 0; i < 3; ++i) CHECK(w[i] >= 0.0);
+}
+
+// ── B15: Resampled MVO ───────────────────────────────────────────────────────
+
+TEST_CASE("resampledMVO returns valid long-only weights",
+          "[portfolios][michaud]") {
+    Vector mu(3); mu << 0.10, 0.08, 0.06;
+    Matrix S(3, 3);
+    S << 0.04, 0.01, 0.005,
+         0.01, 0.05, 0.003,
+         0.005,0.003,0.02;
+    auto w = resampledMVO(mu, S,
+                          /*risk_aversion=*/2.0,
+                          /*n_samples=*/120,
+                          /*n_resamples=*/30,
+                          /*seed=*/123u);
+    REQUIRE(w.size() == 3);
+    CHECK(w.sum() == Approx(1.0).margin(1e-9));
+    for (int i = 0; i < 3; ++i) CHECK(w[i] >= 0.0);
+}

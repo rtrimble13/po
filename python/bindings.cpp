@@ -438,6 +438,20 @@ PYBIND11_MODULE(_portopt, m) {
            py::arg("tolerance") = 1e-8,
            py::arg("max_iters") = 5000,
            "Equal Risk Contribution (risk parity) portfolio.");
+    pf.def("hierarchical_risk_parity", &portfolios::hierarchicalRiskParity,
+           py::arg("covariance"),
+           "Hierarchical Risk Parity (López de Prado, 2016). Long-only, "
+           "budget=1, no return forecast required.");
+    pf.def("maximum_diversification", &portfolios::maximumDiversification,
+           py::arg("covariance"),
+           "Maximum-diversification portfolio (Choueifaty & Coignard 2008).");
+    pf.def("resampled_mvo", &portfolios::resampledMVO,
+           py::arg("mu"), py::arg("sigma"),
+           py::arg("risk_aversion") = 2.0,
+           py::arg("n_samples")     = 252,
+           py::arg("n_resamples")   = 100,
+           py::arg("seed")          = 42u,
+           "Resampled (Michaud) MVO via bootstrap averaging.");
 
     // ── Version ───────────────────────────────────────────────────────────────
     m.attr("__version__") = VERSION_STRING;

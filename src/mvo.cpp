@@ -277,6 +277,12 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
                          data.benchmark_weights.has_value() &&
                          data.benchmark_weights->size() == n;
     const bool want_lev = cons.gross_exposure_limit > 0.0;
+    const bool want_lin_tc =
+        params_.linear_transaction_cost.size() == n &&
+        cons.current_weights.size() == n;
+    // tc_signs is updated by the outer loop after each solve; declared
+    // here so the solve-once lambda below can capture it by reference.
+    Vector tc_signs = want_lin_tc ? Vector::Zero(n) : Vector();
 
     // ── B1: outer loop on TE Lagrangian μ_te ────────────────────────────────
     // ── B2: outer loop on leverage sign vector s ────────────────────────────
@@ -288,11 +294,34 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
         Matrix Q = 2.0 * data.covariance;
         Vector f = -risk_aversion * data.expected_returns;
 
+        // B6 linear cost contribution at current tc_signs:
+        //   add c_i · s_i to f, subtract c_i · s_i · w_prev_i (constant)
+        if (want_lin_tc) {
+            for (int i = 0; i < n; ++i) {
+                const double c = params_.linear_transaction_cost[i];
+                if (c > 0.0)
+                    f[i] += c * tc_signs[i];
+            }
+        }
+
         // Turnover penalty: + κ‖w − w₀‖²  →  Q += 2κI,  f += -2κ w₀
         if (cons.turnover_penalty > 0.0 && cons.current_weights.size() == n) {
             const double k2 = 2.0 * cons.turnover_penalty;
             Q.diagonal().array() += k2;
             f.noalias() -= k2 * cons.current_weights;
+        }
+        // B6: quadratic transaction cost (per-asset diagonal augment to Q).
+        //   Σ_i q_i (w_i − w_prev_i)²  →  Q.diag_i += 2 q_i,
+        //                                  f_i    -= 2 q_i w_prev_i
+        if (params_.quadratic_transaction_cost.size() == n &&
+            cons.current_weights.size() == n) {
+            for (int i = 0; i < n; ++i) {
+                const double q = params_.quadratic_transaction_cost[i];
+                if (q > 0.0) {
+                    Q(i, i) += 2.0 * q;
+                    f[i]    -= 2.0 * q * cons.current_weights[i];
+                }
+            }
         }
         // B1: tracking-error Lagrangian
         if (mu_te > 0.0 && data.benchmark_weights.has_value())
@@ -328,6 +357,9 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
             leverage_signs = Vector::Ones(n);
         }
     }
+
+    // B6 linear transaction-cost sign iteration uses the tc_signs declared
+    // above so the solve-once lambda can capture it by reference.
 
     qp::SolverResult qp;
     int te_iters = 0, lev_iters = 0;
@@ -393,6 +425,19 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
                 leverage_signs = new_signs;
                 changed = true;
                 ++lev_iters;
+            }
+        }
+
+        // B6 update transaction-cost signs sign(w - w_prev).
+        if (want_lin_tc) {
+            Vector new_tc(n);
+            for (int i = 0; i < n; ++i) {
+                const double d = qp.x[i] - cons.current_weights[i];
+                new_tc[i] = d > 1e-12 ? 1.0 : (d < -1e-12 ? -1.0 : 0.0);
+            }
+            if ((new_tc - tc_signs).cwiseAbs().maxCoeff() > 1e-9) {
+                tc_signs = new_tc;
+                changed = true;
             }
         }
 

@@ -161,6 +161,16 @@ struct MVOParameters {
     /// Set to 0 to disable group constraints, larger values enforce more strictly.
     double group_penalty{1e3};
 
+    // ── B6: transaction-cost model ───────────────────────────────────────────
+    /// Per-asset linear transaction cost coefficient. Cost paid:
+    ///   Σ_i linear_transaction_cost_i · |w_i − w_prev_i|
+    /// Requires PortfolioConstraints::current_weights to be populated.
+    Vector linear_transaction_cost;
+    /// Per-asset quadratic / market-impact coefficient (Almgren-Chriss style).
+    /// Cost paid:  Σ_i quadratic_transaction_cost_i · (w_i − w_prev_i)²
+    /// This composes additively with the L2 turnover penalty.
+    Vector quadratic_transaction_cost;
+
     /// When true, enforce group constraints **exactly** via the augmented-
     /// Lagrangian method (A5). `group_penalty` is then used as the *initial*
     /// penalty weight κ₀; the multipliers are updated automatically until

@@ -541,6 +541,53 @@ TEST_CASE("Singular covariance (perfect correlation) still produces feasible wei
     CHECK(r.weights[1] >= -1e-9);
 }
 
+// ── B6: transaction-cost model ───────────────────────────────────────────────
+
+TEST_CASE("Quadratic transaction cost pulls weights toward current_weights",
+          "[mvo][txcost][b6]") {
+    auto data = fiveAssets();
+    MVOParameters p;
+    p.constraints = PortfolioConstraints::longOnly(5);
+    p.constraints.current_weights = Vector::Constant(5, 0.20);
+    p.risk_aversion = 2.0;
+
+    // Baseline (no transaction cost)
+    MVOptimizer base(p);
+    auto r_base = base.optimize(data);
+    const double turnover_base =
+        0.5 * (r_base.weights - p.constraints.current_weights).cwiseAbs().sum();
+
+    // Add a strong quadratic cost — should shrink turnover.
+    p.quadratic_transaction_cost = Vector::Constant(5, 0.5);
+    MVOptimizer with_tc(p);
+    auto r_tc = with_tc.optimize(data);
+    const double turnover_tc =
+        0.5 * (r_tc.weights - p.constraints.current_weights).cwiseAbs().sum();
+    CHECK(turnover_tc < turnover_base);
+}
+
+TEST_CASE("Linear transaction cost shrinks turnover via sign iteration",
+          "[mvo][txcost][b6]") {
+    auto data = fiveAssets();
+    MVOParameters p;
+    p.constraints = PortfolioConstraints::longOnly(5);
+    p.constraints.current_weights = Vector::Constant(5, 0.20);
+    p.risk_aversion = 2.0;
+
+    MVOptimizer base(p);
+    const double turnover_base =
+        0.5 * (base.optimize(data).weights -
+               p.constraints.current_weights).cwiseAbs().sum();
+
+    // Sizable linear cost (e.g., 2% per unit traded) should compress turnover.
+    p.linear_transaction_cost = Vector::Constant(5, 0.02);
+    MVOptimizer with_tc(p);
+    const double turnover_tc =
+        0.5 * (with_tc.optimize(data).weights -
+               p.constraints.current_weights).cwiseAbs().sum();
+    CHECK(turnover_tc < turnover_base);
+}
+
 // ── B1: tracking-error constraint ────────────────────────────────────────────
 
 TEST_CASE("Tracking-error constraint is honoured", "[mvo][te][b1]") {

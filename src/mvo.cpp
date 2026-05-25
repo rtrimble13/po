@@ -26,6 +26,18 @@ static double effectiveRiskFreeRate(const MVOParameters& params,
                                           : data.risk_free_rate;
 }
 
+// ── Numerical tolerances (A9) ────────────────────────────────────────────────
+// Single source of truth for "near a bound" / "approximately equal"
+// checks throughout the MVO pipeline. Absolute values are appropriate
+// for weights — which live in [-1, 1] for any realistic portfolio —
+// so we don't scale these by ‖w‖. Group / linear tolerances scale with
+// the magnitude of the coefficient vector via the caller.
+namespace tol {
+    constexpr double kActiveBound  = 1e-6;   ///< |w_i − bound| < kActiveBound
+    constexpr double kFeasibility  = 1e-9;   ///< budget / equality slack
+    constexpr double kPSD          = 1e-6;   ///< relative eigenvalue floor on Σ
+}
+
 // ── Validation ────────────────────────────────────────────────────────────────
 
 void MVOptimizer::validateMarketData(const MarketData& data) {
@@ -210,11 +222,11 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
                                 data.covariance, *data.benchmark_weights, rf);
     }
 
-    // Active constraints (within 1e-6 of bound)
+    // Active constraints
     for (int i = 0; i < n; ++i) {
-        if (std::abs(qp.x[i] - cons.lower_bounds[i]) < 1e-6)
+        if (std::abs(qp.x[i] - cons.lower_bounds[i]) < tol::kActiveBound)
             result.active_lower_bounds.push_back(i);
-        if (std::abs(qp.x[i] - cons.upper_bounds[i]) < 1e-6)
+        if (std::abs(qp.x[i] - cons.upper_bounds[i]) < tol::kActiveBound)
             result.active_upper_bounds.push_back(i);
     }
 
@@ -351,14 +363,111 @@ OptimizationResult MVOptimizer::maxSharpePortfolio(const MarketData& data) {
     return r;
 }
 
+// ── Frontier-based target search (A4) ─────────────────────────────────────────
+//
+// Solve `metric(w*(λ)) = target` robustly under constraints that can make
+// the λ → metric map non-monotonic. Approach:
+//   1. Scan a fine log-λ grid, recording (λ_k, m_k).
+//   2. Find every segment [λ_k, λ_{k+1}] where target lies between m_k and
+//      m_{k+1} (a "bracket"). When more than one bracket exists, prefer
+//      the segment whose midpoint metric is closest to target.
+//   3. Bisect inside the chosen segment using the actual sign of the
+//      metric difference at the endpoints (no monotonicity assumption).
+//   4. Report multi-bracket ambiguity in status_message so the caller can
+//      decide whether to trust the answer.
+
+struct TargetSearchResult {
+    double lambda;
+    int    brackets;     // how many sign-change segments matched
+    double m_min;
+    double m_max;
+};
+
+template <typename MetricFn>
+static TargetSearchResult findLambdaForTarget(MetricFn metric,
+                                              double target,
+                                              double lo_lam,
+                                              double hi_lam) {
+    const int N = 40;                      // grid resolution
+    std::vector<double> log_lams(N), ms(N);
+    for (int i = 0; i < N; ++i) {
+        const double t = static_cast<double>(i) /
+                         static_cast<double>(N - 1);
+        log_lams[i] = std::log(lo_lam) +
+                      t * (std::log(hi_lam) - std::log(lo_lam));
+        ms[i] = metric(std::exp(log_lams[i]));
+    }
+
+    double m_min = ms[0], m_max = ms[0];
+    for (double v : ms) { m_min = std::min(m_min, v); m_max = std::max(m_max, v); }
+
+    if (target > m_max + 1e-12 || target < m_min - 1e-12) {
+        // Out of achievable range — return endpoint closest to target.
+        double best_lam = std::exp(log_lams[0]);
+        double best_dist = std::abs(ms[0] - target);
+        for (int i = 1; i < N; ++i) {
+            const double d = std::abs(ms[i] - target);
+            if (d < best_dist) { best_dist = d; best_lam = std::exp(log_lams[i]); }
+        }
+        return {best_lam, 0, m_min, m_max};
+    }
+
+    // Find every segment where (m_k - target) changes sign.
+    std::vector<int> brackets;
+    for (int i = 0; i + 1 < N; ++i) {
+        const double a = ms[i]   - target;
+        const double b = ms[i+1] - target;
+        if (a == 0.0 || b == 0.0 || (a < 0) != (b < 0))
+            brackets.push_back(i);
+    }
+    if (brackets.empty()) {
+        // No sign change ⇒ target equals one of the endpoints.
+        double best_lam = std::exp(log_lams[0]);
+        double best_dist = std::abs(ms[0] - target);
+        for (int i = 1; i < N; ++i) {
+            const double d = std::abs(ms[i] - target);
+            if (d < best_dist) { best_dist = d; best_lam = std::exp(log_lams[i]); }
+        }
+        return {best_lam, 0, m_min, m_max};
+    }
+
+    // Choose the bracket whose midpoint metric is closest to target.
+    int chosen = brackets.front();
+    double best_score = std::abs(0.5 * (ms[chosen] + ms[chosen+1]) - target);
+    for (int idx : brackets) {
+        const double score =
+            std::abs(0.5 * (ms[idx] + ms[idx+1]) - target);
+        if (score < best_score) { best_score = score; chosen = idx; }
+    }
+
+    // Bisect within the chosen segment using the actual sign of the
+    // metric difference (no global monotonicity assumption).
+    double a_log = log_lams[chosen];
+    double b_log = log_lams[chosen + 1];
+    double a_val = ms[chosen]     - target;
+    for (int iter = 0; iter < 60; ++iter) {
+        const double mid_log = 0.5 * (a_log + b_log);
+        const double mid_val = metric(std::exp(mid_log)) - target;
+        if (std::abs(mid_val) < 1e-7) {
+            return {std::exp(mid_log),
+                    static_cast<int>(brackets.size()), m_min, m_max};
+        }
+        if ((a_val < 0) == (mid_val < 0)) {
+            a_log = mid_log; a_val = mid_val;
+        } else {
+            b_log = mid_log;
+        }
+    }
+    return {std::exp(0.5 * (a_log + b_log)),
+            static_cast<int>(brackets.size()), m_min, m_max};
+}
+
 OptimizationResult MVOptimizer::optimizeForTargetVolatility(const MarketData& data,
                                                             double target_volatility) {
     validateData(data);
     if (target_volatility <= 0.0)
         throw std::invalid_argument("target_volatility must be > 0");
 
-    // Binary search in log-λ. Depending on constraints, realised volatility
-    // can increase or decrease with λ, so infer direction from endpoints.
     const double lo_lam = std::max(params_.min_risk_aversion, 1e-4);
     const double hi_lam = std::max(params_.max_risk_aversion, lo_lam * 1e4);
 
@@ -366,46 +475,29 @@ OptimizationResult MVOptimizer::optimizeForTargetVolatility(const MarketData& da
         return optimizeFor(data, lam).metrics.volatility;
     };
 
-    const double v_lo = vol_at(lo_lam);
-    const double v_hi = vol_at(hi_lam);
-
-    const bool vol_increases_with_lambda = (v_hi >= v_lo);
-    const double v_min = vol_increases_with_lambda ? v_lo : v_hi;
-    const double v_max = vol_increases_with_lambda ? v_hi : v_lo;
-    const double lam_at_v_min = vol_increases_with_lambda ? lo_lam : hi_lam;
-    const double lam_at_v_max = vol_increases_with_lambda ? hi_lam : lo_lam;
-
-    if (target_volatility >= v_max) {
-        auto r = optimizeFor(data, lam_at_v_max);
-        r.status_message =
-            "Target volatility (" + std::to_string(target_volatility) +
-            ") exceeds max achievable; returning boundary portfolio";
-        return r;
-    }
-    if (target_volatility <= v_min) {
-        auto r = optimizeFor(data, lam_at_v_min);
-        r.status_message =
-            "Target volatility (" + std::to_string(target_volatility) +
-            ") below min achievable; returning boundary portfolio";
-        return r;
-    }
-
-    double log_lo = std::log(lo_lam), log_hi = std::log(hi_lam);
-    for (int iter = 0; iter < 60; ++iter) {
-        const double log_mid = 0.5 * (log_lo + log_hi);
-        const double v_mid = vol_at(std::exp(log_mid));
-        if (std::abs(v_mid - target_volatility) < 1e-5) {
-            auto r = optimizeFor(data, std::exp(log_mid));
-            r.status_message = "Target-volatility portfolio";
-            return r;
+    const auto srch = findLambdaForTarget(vol_at, target_volatility, lo_lam, hi_lam);
+    auto r = optimizeFor(data, srch.lambda);
+    if (srch.brackets == 0) {
+        if (target_volatility > srch.m_max) {
+            r.status_message =
+                "Target volatility (" + std::to_string(target_volatility) +
+                ") exceeds max achievable (" + std::to_string(srch.m_max) +
+                "); returning closest portfolio";
+        } else {
+            r.status_message =
+                "Target volatility (" + std::to_string(target_volatility) +
+                ") below min achievable (" + std::to_string(srch.m_min) +
+                "); returning closest portfolio";
         }
-        if ((v_mid < target_volatility) == vol_increases_with_lambda)
-            log_lo = log_mid; // increase λ
-        else
-            log_hi = log_mid; // decrease λ
+    } else if (srch.brackets > 1) {
+        r.status_message =
+            "Target-volatility portfolio (warning: " +
+            std::to_string(srch.brackets) +
+            " bracketing segments — λ → vol is non-monotonic; selected "
+            "the bracket nearest the target)";
+    } else {
+        r.status_message = "Target-volatility portfolio";
     }
-    auto r = optimizeFor(data, std::exp(0.5 * (log_lo + log_hi)));
-    r.status_message = "Target-volatility portfolio (approximate)";
     return r;
 }
 
@@ -419,48 +511,29 @@ OptimizationResult MVOptimizer::optimizeForTargetReturn(const MarketData& data,
         return optimizeFor(data, lam).metrics.expected_return;
     };
 
-    // Search in log-λ. Depending on constraints, realised return can increase
-    // or decrease with λ, so infer direction from endpoints.
-    const double r_lo = ret_at(lo_lam);
-    const double r_hi = ret_at(hi_lam);
-
-    const bool ret_increases_with_lambda = (r_hi >= r_lo);
-    const double r_min = ret_increases_with_lambda ? r_lo : r_hi;
-    const double r_max = ret_increases_with_lambda ? r_hi : r_lo;
-    const double lam_at_r_min = ret_increases_with_lambda ? lo_lam : hi_lam;
-    const double lam_at_r_max = ret_increases_with_lambda ? hi_lam : lo_lam;
-
-    if (target_return >= r_max) {
-        auto r = optimizeFor(data, lam_at_r_max);
-        r.status_message =
-            "Target return (" + std::to_string(target_return) +
-            ") exceeds max achievable; returning boundary portfolio";
-        return r;
-    }
-    if (target_return <= r_min) {
-        auto r = optimizeFor(data, lam_at_r_min);
-        r.status_message =
-            "Target return (" + std::to_string(target_return) +
-            ") below min achievable; returning boundary portfolio";
-        return r;
-    }
-
-    double log_lo = std::log(lo_lam), log_hi = std::log(hi_lam);
-    for (int iter = 0; iter < 60; ++iter) {
-        const double log_mid = 0.5 * (log_lo + log_hi);
-        const double r_mid = ret_at(std::exp(log_mid));
-        if (std::abs(r_mid - target_return) < 1e-6) {
-            auto r = optimizeFor(data, std::exp(log_mid));
-            r.status_message = "Target-return portfolio";
-            return r;
+    const auto srch = findLambdaForTarget(ret_at, target_return, lo_lam, hi_lam);
+    auto r = optimizeFor(data, srch.lambda);
+    if (srch.brackets == 0) {
+        if (target_return > srch.m_max) {
+            r.status_message =
+                "Target return (" + std::to_string(target_return) +
+                ") exceeds max achievable (" + std::to_string(srch.m_max) +
+                "); returning closest portfolio";
+        } else {
+            r.status_message =
+                "Target return (" + std::to_string(target_return) +
+                ") below min achievable (" + std::to_string(srch.m_min) +
+                "); returning closest portfolio";
         }
-        if ((r_mid < target_return) == ret_increases_with_lambda)
-            log_lo = log_mid; // increase λ
-        else
-            log_hi = log_mid; // decrease λ
+    } else if (srch.brackets > 1) {
+        r.status_message =
+            "Target-return portfolio (warning: " +
+            std::to_string(srch.brackets) +
+            " bracketing segments — λ → return is non-monotonic; selected "
+            "the bracket nearest the target)";
+    } else {
+        r.status_message = "Target-return portfolio";
     }
-    auto r = optimizeFor(data, std::exp(0.5 * (log_lo + log_hi)));
-    r.status_message = "Target-return portfolio (approximate)";
     return r;
 }
 

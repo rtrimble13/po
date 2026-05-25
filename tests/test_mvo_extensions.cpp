@@ -331,3 +331,73 @@ TEST_CASE("OptimizationResult exposes KKT residual",
     CHECK(std::isfinite(r.dual_estimate));
     CHECK(r.kkt_residual < 1e-3);
 }
+
+// ── A4: Target-volatility / target-return out-of-range handling ──────────────
+
+TEST_CASE("Target volatility out of range returns nearest feasible portfolio",
+          "[mvo][target_vol]") {
+    auto data = fiveAssets();
+    MVOParameters p;
+    p.constraints = PortfolioConstraints::longOnly(5);
+    p.min_risk_aversion = 0.5;
+    p.max_risk_aversion = 100.0;
+
+    MVOptimizer opt(p);
+
+    // A wildly large target — should boundary-return with a status message.
+    auto r = opt.optimizeForTargetVolatility(data, 10.0);
+    CHECK(r.converged);
+    CHECK(r.status_message.find("exceeds max") != std::string::npos);
+
+    // A wildly small target — same.
+    auto r2 = opt.optimizeForTargetVolatility(data, 0.001);
+    CHECK(r2.converged);
+    CHECK(r2.status_message.find("below min") != std::string::npos);
+}
+
+// ── A10: Singular Σ (perfectly-correlated assets) ────────────────────────────
+
+TEST_CASE("MVO with rank-1 covariance still produces a sensible portfolio",
+          "[mvo][singular_cov]") {
+    MarketData d;
+    const int n = 3;
+    d.assets.resize(n);
+    d.assets[0] = {"X", "X", 0.10, 1e11};
+    d.assets[1] = {"Y", "Y", 0.12, 1e11};
+    d.assets[2] = {"Z", "Z", 0.08, 1e11};
+    d.expected_returns = Vector(n);
+    d.expected_returns << 0.10, 0.12, 0.08;
+    // Rank-1: Σ = σ² · vv'  with v = [1, 1, 1]'
+    Vector v = Vector::Ones(n);
+    d.covariance = 0.04 * v * v.transpose();
+    // Add tiny ridge so LDLT succeeds and the QP is well-posed.
+    d.covariance.diagonal().array() += 1e-8;
+
+    MVOParameters p;
+    p.constraints   = PortfolioConstraints::longOnly(n);
+    p.risk_aversion = 5.0;
+    MVOptimizer opt(p);
+    auto r = opt.optimize(d);
+    CHECK(r.converged);
+    CHECK(r.weights.sum() == Approx(1.0).margin(1e-6));
+    CHECK((r.weights.array() >= -1e-8).all());
+}
+
+// ── A10: Tightly-binding bounds (lb = ub for several assets) ─────────────────
+
+TEST_CASE("MVO honours lb = ub (pinned positions)", "[mvo][tight_bounds]") {
+    auto data = fiveAssets();
+    MVOParameters p;
+    p.constraints   = PortfolioConstraints::longOnly(5);
+    p.risk_aversion = 2.0;
+    // Pin asset 0 at 0.30, asset 1 at 0.10.
+    p.constraints.fixWeight(0, 0.30);
+    p.constraints.fixWeight(1, 0.10);
+
+    MVOptimizer opt(p);
+    auto r = opt.optimize(data);
+    REQUIRE(r.converged);
+    CHECK(r.weights[0] == Approx(0.30).margin(1e-6));
+    CHECK(r.weights[1] == Approx(0.10).margin(1e-6));
+    CHECK(r.weights.sum() == Approx(1.0).margin(1e-6));
+}

@@ -1,9 +1,14 @@
 #include <portopt/mvo.hpp>
+#include <portopt/portopt.hpp>   // VERSION_STRING for audit trail
 #include <portopt/logging.hpp>
 
 #include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <limits>
+#include <optional>
+#include <sstream>
 #include <stdexcept>
 
 namespace portopt {
@@ -15,19 +20,120 @@ MVOptimizer::MVOptimizer(MVOParameters params)
     solver_cfg_.use_nesterov   = true;
 }
 
+// Resolve the effective risk-free rate: an explicit override in
+// MVOParameters (including an override to exactly 0.0) wins over
+// MarketData::risk_free_rate. For backward compatibility, a non-zero
+// MVOParameters::risk_free_rate also implies "override".
+static double effectiveRiskFreeRate(const MVOParameters& params,
+                                    const MarketData& data) {
+    return (params.risk_free_rate_is_set || params.risk_free_rate != 0.0)
+               ? params.risk_free_rate
+               : data.risk_free_rate;
+}
+
+// ── Numerical tolerances (A9) ────────────────────────────────────────────────
+// Single source of truth for "near a bound" / "approximately equal"
+// checks throughout the MVO pipeline. Absolute values are appropriate
+// for weights — which live in [-1, 1] for any realistic portfolio —
+// so we don't scale these by ‖w‖. Group / linear tolerances scale with
+// the magnitude of the coefficient vector via the caller.
+namespace tol {
+    constexpr double kActiveBound  = 1e-6;   ///< |w_i − bound| < kActiveBound
+    constexpr double kFeasibility  = 1e-9;   ///< budget / equality slack
+    constexpr double kPSD          = 1e-6;   ///< relative eigenvalue floor on Σ
+}
+
+// ── Audit-trail hashing (B16) ────────────────────────────────────────────────
+// Stable, version-independent 64-bit FNV-1a over a canonicalised
+// stringification of inputs / params. Used to stamp every
+// OptimizationResult so two runs with identical inputs share an
+// identical hash, and any drift surfaces immediately.
+static std::string fnv1aHex(const std::string& s) {
+    std::uint64_t h = 0xcbf29ce484222325ULL;
+    for (char c : s) {
+        h ^= static_cast<std::uint8_t>(c);
+        h *= 0x100000001b3ULL;
+    }
+    char buf[20];
+    std::snprintf(buf, sizeof(buf), "%016llx",
+                  static_cast<unsigned long long>(h));
+    return std::string(buf);
+}
+
+static void writeVec(std::ostringstream& os, const Vector& v) {
+    os << '[' << v.size() << ':';
+    os.precision(16);
+    for (int i = 0; i < v.size(); ++i) os << v[i] << ',';
+    os << ']';
+}
+
+static void writeMat(std::ostringstream& os, const Matrix& M) {
+    os << '{' << M.rows() << 'x' << M.cols() << ':';
+    os.precision(16);
+    for (int i = 0; i < M.rows(); ++i)
+        for (int j = 0; j < M.cols(); ++j) os << M(i, j) << ',';
+    os << '}';
+}
+
+static std::string inputHash(const MarketData& data) {
+    std::ostringstream os;
+    writeVec(os, data.expected_returns);
+    writeMat(os, data.covariance);
+    if (data.market_weights)    { os << "mw="; writeVec(os, *data.market_weights); }
+    if (data.benchmark_weights) { os << "bm="; writeVec(os, *data.benchmark_weights); }
+    os.precision(16);
+    os << "rf=" << data.risk_free_rate;
+    return fnv1aHex(os.str());
+}
+
+static std::string paramsHash(const MVOParameters& p) {
+    std::ostringstream os;
+    os.precision(16);
+    os << "lam=" << p.risk_aversion
+       << " npts=" << p.frontier_points
+       << " lam_min=" << p.min_risk_aversion
+       << " lam_max=" << p.max_risk_aversion
+       << " rf="  << p.risk_free_rate
+       << " rf_set=" << (p.risk_free_rate_is_set ? 1 : 0)
+       << " grp_pen=" << p.group_penalty
+       << " grp_hard=" << (p.hard_group_constraints ? 1 : 0)
+       << " grp_tol=" << p.group_tolerance
+       << " tangent=" << (p.use_tangent_reformulation ? 1 : 0)
+       << " timeout_ms=" << p.timeout_ms
+       << " budget=" << p.constraints.budget
+       << " kappa="  << p.constraints.turnover_penalty
+       << " allow_short=" << (p.constraints.allow_short_selling ? 1 : 0)
+       << " te_limit=" << p.constraints.tracking_error_limit
+       << " gross_limit=" << p.constraints.gross_exposure_limit;
+    writeVec(os, p.constraints.lower_bounds);
+    writeVec(os, p.constraints.upper_bounds);
+    writeVec(os, p.linear_transaction_cost);
+    writeVec(os, p.quadratic_transaction_cost);
+    if (p.constraints.current_weights.size() > 0)
+        writeVec(os, p.constraints.current_weights);
+    for (const auto& g : p.constraints.groups) {
+        os << "[" << g.lower << ',' << g.upper << ']';
+        writeVec(os, g.coefficients);
+    }
+    return fnv1aHex(os.str());
+}
+
 // ── Validation ────────────────────────────────────────────────────────────────
 
 void MVOptimizer::validateMarketData(const MarketData& data) {
     const int n = static_cast<int>(data.assets.size());
     if (n == 0)
-        throw std::invalid_argument("MVO: asset universe is empty");
+        throw InvalidMarketData("empty_asset_universe",
+                                "MVO: asset universe is empty");
     if (data.expected_returns.size() != n)
-        throw std::invalid_argument(
+        throw InvalidMarketData(
+            "expected_returns_size_mismatch",
             "MVO: expected_returns size mismatch (got " +
             std::to_string(data.expected_returns.size()) +
             ", expected " + std::to_string(n) + ")");
     if (data.covariance.rows() != n || data.covariance.cols() != n)
-        throw std::invalid_argument(
+        throw InvalidMarketData(
+            "covariance_size_mismatch",
             "MVO: covariance matrix size mismatch (got " +
             std::to_string(data.covariance.rows()) + "x" +
             std::to_string(data.covariance.cols()) +
@@ -36,13 +142,16 @@ void MVOptimizer::validateMarketData(const MarketData& data) {
     // Symmetry check (relative tolerance)
     const double sym_err = (data.covariance - data.covariance.transpose()).norm();
     if (sym_err > 1e-6 * std::max(1.0, data.covariance.norm()))
-        throw std::invalid_argument("MVO: covariance matrix is not symmetric");
+        throw InvalidMarketData("covariance_not_symmetric",
+                                "MVO: covariance matrix is not symmetric");
 
     // Diagonal must be non-negative (variances)
     for (int i = 0; i < n; ++i) {
         if (data.covariance(i, i) < -1e-10)
-            throw std::invalid_argument(
-                "MVO: covariance has negative diagonal at index " + std::to_string(i));
+            throw InvalidMarketData(
+                "negative_variance",
+                "MVO: covariance has negative diagonal at index " +
+                std::to_string(i));
     }
 
     // PSD check via LDLT (fast for symmetric matrices)
@@ -63,7 +172,8 @@ void MVOptimizer::validateMarketData(const MarketData& data) {
 
     if (data.benchmark_weights.has_value() &&
         data.benchmark_weights->size() != n)
-        throw std::invalid_argument("MVO: benchmark_weights size mismatch");
+        throw InvalidMarketData("benchmark_weights_size_mismatch",
+                                "MVO: benchmark_weights size mismatch");
 }
 
 void MVOptimizer::validateData(const MarketData& data) const {
@@ -140,6 +250,37 @@ void MVOptimizer::augmentBenchmarkMetrics(PortfolioMetrics& metrics,
     (void)risk_free_rate;
 }
 
+// ── B1: build the Q, f modification for a Lagrangian TE penalty ─────────────
+// At Lagrangian multiplier μ ≥ 0, replace the objective with
+//     w'Σw − λμ_r'w  +  μ · (w−b)'Σ(w−b)
+//   = (1 + μ) w'Σw − (λμ_r + 2μΣb)'w + μ·b'Σb
+static void applyTrackingErrorLagrangian(Matrix& Q, Vector& f,
+                                          const Matrix& Sigma,
+                                          const Vector& b,
+                                          double mu_te) {
+    if (mu_te <= 0.0) return;
+    Q.noalias() += (2.0 * mu_te) * Sigma;
+    f.noalias() -= (2.0 * mu_te) * (Sigma * b);
+}
+
+// ── B2: linearise |w|_1 ≤ L around a fixed sign vector ──────────────────────
+// Replace `Σ|w_i| ≤ L` with `s'w ≤ L` for the current sign estimate s. The
+// outer fixed-point iteration in `optimizeFor` re-evaluates `s` from the
+// previous solve until signs stabilise. When signs converge, `s'w = |w|_1`
+// and the linear cap is exactly the gross-exposure cap. The iteration is a
+// heuristic — pathological data can cause sign-flip oscillation; in that
+// case the constraint is enforced only approximately. For institutional
+// hard enforcement use the variable-splitting reformulation (out of scope
+// for this iteration).
+static GroupConstraint leverageGroup(const Vector& signs, double L) {
+    GroupConstraint g;
+    g.description  = "gross exposure";
+    g.coefficients = signs;
+    g.lower = -1e30;
+    g.upper = L;
+    return g;
+}
+
 // ── Core single-λ solve ───────────────────────────────────────────────────────
 
 OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
@@ -152,23 +293,209 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
         cons = PortfolioConstraints::longOnly(n);
     cons.validate(n);
 
-    // QP: min  w'Σw - λμ'w  ≡  min  0.5 w'(2Σ)w + (-λμ)'w
-    Matrix Q = 2.0 * data.covariance;
-    Vector f = -risk_aversion * data.expected_returns;
+    const bool want_te = cons.tracking_error_limit > 0.0 &&
+                         data.benchmark_weights.has_value() &&
+                         data.benchmark_weights->size() == n;
+    const bool want_lev = cons.gross_exposure_limit > 0.0;
+    const bool want_lin_tc =
+        params_.linear_transaction_cost.size() == n &&
+        cons.current_weights.size() == n;
+    // tc_signs is updated by the outer loop after each solve; declared
+    // here so the solve-once lambda below can capture it by reference.
+    Vector tc_signs = want_lin_tc ? Vector::Zero(n) : Vector();
 
-    // Turnover penalty: + κ‖w − w₀‖²  →  Q += 2κI,  f += -2κ w₀
-    if (cons.turnover_penalty > 0.0 && cons.current_weights.size() == n) {
-        const double k2 = 2.0 * cons.turnover_penalty;
-        Q.diagonal().array() += k2;
-        f.noalias() -= k2 * cons.current_weights;
-    }
+    // ── B1: outer loop on TE Lagrangian μ_te ────────────────────────────────
+    // ── B2: outer loop on leverage sign vector s ────────────────────────────
+    // Both wrap the underlying QP solve. We bracket μ_te ∈ [0, μ_te_max]
+    // and bisect until realised TE matches the limit (or μ_te = 0 if the
+    // unconstrained solve already satisfies it).
+    auto solve_once = [&](double mu_te,
+                          const std::vector<GroupConstraint>& extra_groups) {
+        Matrix Q = 2.0 * data.covariance;
+        Vector f = -risk_aversion * data.expected_returns;
 
-    solver_cfg_.budget = cons.budget;
+        // B6 linear cost contribution at current tc_signs:
+        //   add c_i · s_i to f, subtract c_i · s_i · w_prev_i (constant)
+        if (want_lin_tc) {
+            for (int i = 0; i < n; ++i) {
+                const double c = params_.linear_transaction_cost[i];
+                if (c > 0.0)
+                    f[i] += c * tc_signs[i];
+            }
+        }
+
+        // Turnover penalty: + κ‖w − w₀‖²  →  Q += 2κI,  f += -2κ w₀
+        if (cons.turnover_penalty > 0.0 && cons.current_weights.size() == n) {
+            const double k2 = 2.0 * cons.turnover_penalty;
+            Q.diagonal().array() += k2;
+            f.noalias() -= k2 * cons.current_weights;
+        }
+        // B6: quadratic transaction cost (per-asset diagonal augment to Q).
+        //   Σ_i q_i (w_i − w_prev_i)²  →  Q.diag_i += 2 q_i,
+        //                                  f_i    -= 2 q_i w_prev_i
+        if (params_.quadratic_transaction_cost.size() == n &&
+            cons.current_weights.size() == n) {
+            for (int i = 0; i < n; ++i) {
+                const double q = params_.quadratic_transaction_cost[i];
+                if (q > 0.0) {
+                    Q(i, i) += 2.0 * q;
+                    f[i]    -= 2.0 * q * cons.current_weights[i];
+                }
+            }
+        }
+        // B1: tracking-error Lagrangian
+        if (mu_te > 0.0 && data.benchmark_weights.has_value())
+            applyTrackingErrorLagrangian(Q, f, data.covariance,
+                                         *data.benchmark_weights, mu_te);
+
+        // Merge user groups + extra (e.g. leverage)
+        std::vector<GroupConstraint> all_groups = cons.groups;
+        for (const auto& g : extra_groups) all_groups.push_back(g);
+
+        solver_cfg_.budget       = cons.budget;
+        solver_cfg_.cancellation = params_.cancellation;
+        solver_cfg_.timeout_ms   = params_.timeout_ms;
+        if (params_.hard_group_constraints && !all_groups.empty()) {
+            return qp::solveWithHardGroups(
+                Q, f, cons.lower_bounds, cons.upper_bounds,
+                all_groups, params_.group_penalty,
+                params_.group_tolerance, 30, solver_cfg_);
+        }
+        return qp::solveWithGroups(
+            Q, f, cons.lower_bounds, cons.upper_bounds,
+            all_groups, params_.group_penalty, solver_cfg_);
+    };
 
     const auto t0 = std::chrono::steady_clock::now();
-    qp::SolverResult qp = qp::solveWithGroups(
-        Q, f, cons.lower_bounds, cons.upper_bounds,
-        cons.groups, params_.group_penalty, solver_cfg_);
+
+    // B2 leverage fixed-point: start from sign of current_weights (or all +1).
+    Vector leverage_signs;
+    if (want_lev) {
+        if (cons.current_weights.size() == n) {
+            leverage_signs = Vector::Zero(n);
+            for (int i = 0; i < n; ++i)
+                leverage_signs[i] = cons.current_weights[i] >= 0 ? 1.0 : -1.0;
+        } else {
+            leverage_signs = Vector::Ones(n);
+        }
+    }
+
+    // B6 linear transaction-cost sign iteration uses the tc_signs declared
+    // above so the solve-once lambda can capture it by reference.
+
+    qp::SolverResult qp;
+    int te_iters = 0, lev_iters = 0;
+    double mu_te = 0.0;
+
+    auto build_extras = [&]() {
+        std::vector<GroupConstraint> extras;
+        if (want_lev)
+            extras.push_back(leverageGroup(leverage_signs,
+                                            cons.gross_exposure_limit));
+        return extras;
+    };
+
+    // Joint outer iteration: alternates leverage-sign update and TE bisection.
+    for (int outer = 0; outer < 20; ++outer) {
+        bool changed = false;
+
+        // First, solve at current μ_te / signs and check TE
+        qp = solve_once(mu_te, build_extras());
+
+        // B1 bisection on μ_te
+        if (want_te) {
+            const Vector active = qp.x - *data.benchmark_weights;
+            double te2 = active.dot(data.covariance * active);
+            const double te_target2 =
+                cons.tracking_error_limit * cons.tracking_error_limit;
+            if (mu_te == 0.0 && te2 <= te_target2 + 1e-12) {
+                // Unconstrained TE is already within limit — no work needed.
+            } else if (mu_te > 0.0 && te2 <= te_target2 - 1e-9) {
+                // If TE is now comfortably slack, allow μ_te to decrease.
+                auto qp_zero = solve_once(0.0, build_extras());
+                const Vector a0 = qp_zero.x - *data.benchmark_weights;
+                const double te2_zero = a0.dot(data.covariance * a0);
+                if (te2_zero <= te_target2 + 1e-9) {
+                    mu_te = 0.0;
+                    qp = qp_zero;
+                    changed = true;
+                    ++te_iters;
+                } else {
+                    double lo = 0.0, hi = mu_te;
+                    for (int k = 0; k < 30; ++k) {
+                        const double mid = 0.5 * (lo + hi);
+                        auto qp_mid = solve_once(mid, build_extras());
+                        const Vector a_mid = qp_mid.x - *data.benchmark_weights;
+                        const double t_mid = a_mid.dot(data.covariance * a_mid);
+                        if (t_mid <= te_target2) {
+                            hi = mid;
+                            qp = qp_mid;
+                        } else {
+                            lo = mid;
+                        }
+                        if (hi - lo < 1e-4 * std::max(1.0, hi)) break;
+                    }
+                    if (hi < mu_te) {
+                        mu_te = hi;
+                        changed = true;
+                        ++te_iters;
+                    }
+                }
+            } else if (te2 > te_target2 + 1e-9) {
+                // Bisect μ_te ∈ [mu_te, mu_hi] until TE meets target.
+                double lo = mu_te, hi = std::max(1.0, mu_te) * 1024.0;
+                // Grow hi until feasible
+                for (int k = 0; k < 12; ++k) {
+                    auto qp_hi = solve_once(hi, build_extras());
+                    const Vector a_hi = qp_hi.x - *data.benchmark_weights;
+                    const double t_hi = a_hi.dot(data.covariance * a_hi);
+                    if (t_hi <= te_target2) { qp = qp_hi; break; }
+                    lo = hi; hi *= 4.0;
+                    if (k == 11) qp = qp_hi;  // give up; use largest
+                }
+                // Bisect
+                for (int k = 0; k < 30; ++k) {
+                    const double mid = 0.5 * (lo + hi);
+                    auto qp_mid = solve_once(mid, build_extras());
+                    const Vector a_mid = qp_mid.x - *data.benchmark_weights;
+                    const double t_mid = a_mid.dot(data.covariance * a_mid);
+                    if (t_mid > te_target2) lo = mid;
+                    else                    { hi = mid; qp = qp_mid; }
+                    if (hi - lo < 1e-4 * std::max(1.0, hi)) break;
+                }
+                mu_te = hi;
+                changed = true;
+                ++te_iters;
+            }
+        }
+
+        // B2 update leverage signs from new solution
+        if (want_lev) {
+            Vector new_signs(n);
+            for (int i = 0; i < n; ++i)
+                new_signs[i] = qp.x[i] >= 0.0 ? 1.0 : -1.0;
+            if ((new_signs - leverage_signs).cwiseAbs().maxCoeff() > 1e-9) {
+                leverage_signs = new_signs;
+                changed = true;
+                ++lev_iters;
+            }
+        }
+
+        // B6 update transaction-cost signs sign(w - w_prev).
+        if (want_lin_tc) {
+            Vector new_tc(n);
+            for (int i = 0; i < n; ++i) {
+                const double d = qp.x[i] - cons.current_weights[i];
+                new_tc[i] = d > 1e-12 ? 1.0 : (d < -1e-12 ? -1.0 : 0.0);
+            }
+            if ((new_tc - tc_signs).cwiseAbs().maxCoeff() > 1e-9) {
+                tc_signs = new_tc;
+                changed = true;
+            }
+        }
+
+        if (!changed) break;
+    }
     const auto t1 = std::chrono::steady_clock::now();
 
     OptimizationResult result;
@@ -179,12 +506,14 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
     result.method     = "MVO";
     result.solve_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.gradient_at_optimum = qp.gradient;
+    result.primal_residual = qp.primal_residual;
+    result.kkt_residual    = qp.kkt_residual;
+    result.dual_estimate   = qp.dual_estimate;
+    result.library_version = VERSION_STRING;
+    result.input_hash      = inputHash(data);
+    result.params_hash     = paramsHash(params_);
 
-    // Use params_.risk_free_rate as an explicit override when provided;
-    // otherwise fall back to the market-data risk-free rate.
-    const double rf = (params_.risk_free_rate != 0.0)
-                        ? params_.risk_free_rate
-                        : data.risk_free_rate;
+    const double rf = effectiveRiskFreeRate(params_, data);
     result.metrics = computeMetrics(qp.x, data.expected_returns,
                                     data.covariance, rf);
 
@@ -200,11 +529,11 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
                                 data.covariance, *data.benchmark_weights, rf);
     }
 
-    // Active constraints (within 1e-6 of bound)
+    // Active constraints
     for (int i = 0; i < n; ++i) {
-        if (std::abs(qp.x[i] - cons.lower_bounds[i]) < 1e-6)
+        if (std::abs(qp.x[i] - cons.lower_bounds[i]) < tol::kActiveBound)
             result.active_lower_bounds.push_back(i);
-        if (std::abs(qp.x[i] - cons.upper_bounds[i]) < 1e-6)
+        if (std::abs(qp.x[i] - cons.upper_bounds[i]) < tol::kActiveBound)
             result.active_upper_bounds.push_back(i);
     }
 
@@ -286,13 +615,87 @@ OptimizationResult MVOptimizer::minVariancePortfolio(const MarketData& data) {
     return r;
 }
 
+// ── A3: Analytical tangent fast path ────────────────────────────────────────
+//
+// For unconstrained long-only with budget=1, the tangent (max-Sharpe)
+// portfolio has the closed form:
+//     y* = Σ⁻¹(μ − rf·1),   w* = y* / 1'y*
+// When this w* satisfies the user-supplied box constraints `lb ≤ w ≤ ub`
+// and the budget, it IS the tangent portfolio — no sweep needed. We verify
+// feasibility post-hoc and fall back to the heuristic when bounds bind.
+static std::optional<Vector>
+tryAnalyticalTangent(const MarketData& data, double rf,
+                     const PortfolioConstraints& cons) {
+    const int n = static_cast<int>(data.assets.size());
+    const Vector excess = data.expected_returns -
+                          Vector::Constant(n, rf);
+
+    // If every excess return is non-positive there is no positive-Sharpe
+    // portfolio along this analytical path.
+    if (excess.maxCoeff() <= 0.0) return std::nullopt;
+
+    Eigen::LDLT<Matrix> ldlt(0.5 * (data.covariance +
+                                     data.covariance.transpose()));
+    if (ldlt.info() != Eigen::Success) return std::nullopt;
+    const Vector y = ldlt.solve(excess);
+    const double s = y.sum();
+    if (!std::isfinite(s) || std::abs(s) < 1e-12) return std::nullopt;
+    Vector w = y / s;
+    // Rescale to the user's budget (the unconstrained tangent normalises
+    // to 1'w = 1; if the user wants e.g. 130/30 or dollar-neutral the
+    // analytical path doesn't apply directly).
+    if (std::abs(cons.budget - 1.0) > 1e-9) return std::nullopt;
+
+    // Feasibility check against the box bounds.
+    for (int i = 0; i < n; ++i) {
+        if (w[i] < cons.lower_bounds[i] - 1e-9 ||
+            w[i] > cons.upper_bounds[i] + 1e-9)
+            return std::nullopt;
+    }
+    return w;
+}
+
 OptimizationResult MVOptimizer::maxSharpePortfolio(const MarketData& data) {
     validateData(data);
+    const int n = static_cast<int>(data.assets.size());
+    const double rf = effectiveRiskFreeRate(params_, data);
 
-    // Sweep λ and pick the highest-Sharpe point, refine via golden-section.
-    // This is robust to non-convex behaviour of Sharpe vs λ that arises
-    // when bounds are tight.
-    const double rf = data.risk_free_rate + params_.risk_free_rate;
+    // A3 fast path: analytical tangent when constraints don't bind.
+    if (params_.use_tangent_reformulation) {
+        PortfolioConstraints cons = params_.constraints;
+        if (cons.lower_bounds.size() != n || cons.upper_bounds.size() != n)
+            cons = PortfolioConstraints::longOnly(n);
+        if (auto w_opt = tryAnalyticalTangent(data, rf, cons)) {
+            OptimizationResult r;
+            r.weights = *w_opt;
+            r.assets  = data.assets;
+            r.method  = "MVO";
+            r.converged = true;
+            r.iterations = 0;
+            r.solve_time_ms = 0.0;
+            r.metrics = computeMetrics(*w_opt, data.expected_returns,
+                                       data.covariance, rf);
+            if (data.benchmark_weights.has_value() &&
+                data.benchmark_weights->size() == n) {
+                augmentBenchmarkMetrics(r.metrics, *w_opt,
+                                        data.expected_returns,
+                                        data.covariance,
+                                        *data.benchmark_weights, rf);
+            }
+            r.library_version = VERSION_STRING;
+            r.input_hash      = inputHash(data);
+            r.params_hash     = paramsHash(params_);
+            r.status_message  =
+                "Maximum-Sharpe (tangency) — analytical fast path (A3)";
+            log::info("MVO max-Sharpe via analytical tangent: sharpe={:.4f}",
+                      r.metrics.sharpe_ratio);
+            return r;
+        }
+    }
+
+    // Fallback: sweep λ and pick the highest-Sharpe point, refine via
+    // golden-section. Robust to non-convex Sharpe-vs-λ behaviour that
+    // arises when bounds bind.
 
     auto sharpe_at = [&](double lam) {
         auto r = optimizeFor(data, lam);
@@ -341,14 +744,111 @@ OptimizationResult MVOptimizer::maxSharpePortfolio(const MarketData& data) {
     return r;
 }
 
+// ── Frontier-based target search (A4) ─────────────────────────────────────────
+//
+// Solve `metric(w*(λ)) = target` robustly under constraints that can make
+// the λ → metric map non-monotonic. Approach:
+//   1. Scan a fine log-λ grid, recording (λ_k, m_k).
+//   2. Find every segment [λ_k, λ_{k+1}] where target lies between m_k and
+//      m_{k+1} (a "bracket"). When more than one bracket exists, prefer
+//      the segment whose midpoint metric is closest to target.
+//   3. Bisect inside the chosen segment using the actual sign of the
+//      metric difference at the endpoints (no monotonicity assumption).
+//   4. Report multi-bracket ambiguity in status_message so the caller can
+//      decide whether to trust the answer.
+
+struct TargetSearchResult {
+    double lambda;
+    int    brackets;     // how many sign-change segments matched
+    double m_min;
+    double m_max;
+};
+
+template <typename MetricFn>
+static TargetSearchResult findLambdaForTarget(MetricFn metric,
+                                              double target,
+                                              double lo_lam,
+                                              double hi_lam) {
+    const int N = 40;                      // grid resolution
+    std::vector<double> log_lams(N), ms(N);
+    for (int i = 0; i < N; ++i) {
+        const double t = static_cast<double>(i) /
+                         static_cast<double>(N - 1);
+        log_lams[i] = std::log(lo_lam) +
+                      t * (std::log(hi_lam) - std::log(lo_lam));
+        ms[i] = metric(std::exp(log_lams[i]));
+    }
+
+    double m_min = ms[0], m_max = ms[0];
+    for (double v : ms) { m_min = std::min(m_min, v); m_max = std::max(m_max, v); }
+
+    if (target > m_max + 1e-12 || target < m_min - 1e-12) {
+        // Out of achievable range — return endpoint closest to target.
+        double best_lam = std::exp(log_lams[0]);
+        double best_dist = std::abs(ms[0] - target);
+        for (int i = 1; i < N; ++i) {
+            const double d = std::abs(ms[i] - target);
+            if (d < best_dist) { best_dist = d; best_lam = std::exp(log_lams[i]); }
+        }
+        return {best_lam, 0, m_min, m_max};
+    }
+
+    // Find every segment where (m_k - target) changes sign.
+    std::vector<int> brackets;
+    for (int i = 0; i + 1 < N; ++i) {
+        const double a = ms[i]   - target;
+        const double b = ms[i+1] - target;
+        if (a == 0.0 || b == 0.0 || (a < 0) != (b < 0))
+            brackets.push_back(i);
+    }
+    if (brackets.empty()) {
+        // No sign change ⇒ target equals one of the endpoints.
+        double best_lam = std::exp(log_lams[0]);
+        double best_dist = std::abs(ms[0] - target);
+        for (int i = 1; i < N; ++i) {
+            const double d = std::abs(ms[i] - target);
+            if (d < best_dist) { best_dist = d; best_lam = std::exp(log_lams[i]); }
+        }
+        return {best_lam, 0, m_min, m_max};
+    }
+
+    // Choose the bracket whose midpoint metric is closest to target.
+    int chosen = brackets.front();
+    double best_score = std::abs(0.5 * (ms[chosen] + ms[chosen+1]) - target);
+    for (int idx : brackets) {
+        const double score =
+            std::abs(0.5 * (ms[idx] + ms[idx+1]) - target);
+        if (score < best_score) { best_score = score; chosen = idx; }
+    }
+
+    // Bisect within the chosen segment using the actual sign of the
+    // metric difference (no global monotonicity assumption).
+    double a_log = log_lams[chosen];
+    double b_log = log_lams[chosen + 1];
+    double a_val = ms[chosen]     - target;
+    for (int iter = 0; iter < 60; ++iter) {
+        const double mid_log = 0.5 * (a_log + b_log);
+        const double mid_val = metric(std::exp(mid_log)) - target;
+        if (std::abs(mid_val) < 1e-7) {
+            return {std::exp(mid_log),
+                    static_cast<int>(brackets.size()), m_min, m_max};
+        }
+        if ((a_val < 0) == (mid_val < 0)) {
+            a_log = mid_log; a_val = mid_val;
+        } else {
+            b_log = mid_log;
+        }
+    }
+    return {std::exp(0.5 * (a_log + b_log)),
+            static_cast<int>(brackets.size()), m_min, m_max};
+}
+
 OptimizationResult MVOptimizer::optimizeForTargetVolatility(const MarketData& data,
                                                             double target_volatility) {
     validateData(data);
     if (target_volatility <= 0.0)
         throw std::invalid_argument("target_volatility must be > 0");
 
-    // Binary search in log-λ. Depending on constraints, realised volatility
-    // can increase or decrease with λ, so infer direction from endpoints.
     const double lo_lam = std::max(params_.min_risk_aversion, 1e-4);
     const double hi_lam = std::max(params_.max_risk_aversion, lo_lam * 1e4);
 
@@ -356,46 +856,29 @@ OptimizationResult MVOptimizer::optimizeForTargetVolatility(const MarketData& da
         return optimizeFor(data, lam).metrics.volatility;
     };
 
-    const double v_lo = vol_at(lo_lam);
-    const double v_hi = vol_at(hi_lam);
-
-    const bool vol_increases_with_lambda = (v_hi >= v_lo);
-    const double v_min = vol_increases_with_lambda ? v_lo : v_hi;
-    const double v_max = vol_increases_with_lambda ? v_hi : v_lo;
-    const double lam_at_v_min = vol_increases_with_lambda ? lo_lam : hi_lam;
-    const double lam_at_v_max = vol_increases_with_lambda ? hi_lam : lo_lam;
-
-    if (target_volatility >= v_max) {
-        auto r = optimizeFor(data, lam_at_v_max);
-        r.status_message =
-            "Target volatility (" + std::to_string(target_volatility) +
-            ") exceeds max achievable; returning boundary portfolio";
-        return r;
-    }
-    if (target_volatility <= v_min) {
-        auto r = optimizeFor(data, lam_at_v_min);
-        r.status_message =
-            "Target volatility (" + std::to_string(target_volatility) +
-            ") below min achievable; returning boundary portfolio";
-        return r;
-    }
-
-    double log_lo = std::log(lo_lam), log_hi = std::log(hi_lam);
-    for (int iter = 0; iter < 60; ++iter) {
-        const double log_mid = 0.5 * (log_lo + log_hi);
-        const double v_mid = vol_at(std::exp(log_mid));
-        if (std::abs(v_mid - target_volatility) < 1e-5) {
-            auto r = optimizeFor(data, std::exp(log_mid));
-            r.status_message = "Target-volatility portfolio";
-            return r;
+    const auto srch = findLambdaForTarget(vol_at, target_volatility, lo_lam, hi_lam);
+    auto r = optimizeFor(data, srch.lambda);
+    if (srch.brackets == 0) {
+        if (target_volatility > srch.m_max) {
+            r.status_message =
+                "Target volatility (" + std::to_string(target_volatility) +
+                ") exceeds max achievable (" + std::to_string(srch.m_max) +
+                "); returning closest portfolio";
+        } else {
+            r.status_message =
+                "Target volatility (" + std::to_string(target_volatility) +
+                ") below min achievable (" + std::to_string(srch.m_min) +
+                "); returning closest portfolio";
         }
-        if ((v_mid < target_volatility) == vol_increases_with_lambda)
-            log_lo = log_mid; // increase λ
-        else
-            log_hi = log_mid; // decrease λ
+    } else if (srch.brackets > 1) {
+        r.status_message =
+            "Target-volatility portfolio (warning: " +
+            std::to_string(srch.brackets) +
+            " bracketing segments — λ → vol is non-monotonic; selected "
+            "the bracket nearest the target)";
+    } else {
+        r.status_message = "Target-volatility portfolio";
     }
-    auto r = optimizeFor(data, std::exp(0.5 * (log_lo + log_hi)));
-    r.status_message = "Target-volatility portfolio (approximate)";
     return r;
 }
 
@@ -409,48 +892,29 @@ OptimizationResult MVOptimizer::optimizeForTargetReturn(const MarketData& data,
         return optimizeFor(data, lam).metrics.expected_return;
     };
 
-    // Search in log-λ. Depending on constraints, realised return can increase
-    // or decrease with λ, so infer direction from endpoints.
-    const double r_lo = ret_at(lo_lam);
-    const double r_hi = ret_at(hi_lam);
-
-    const bool ret_increases_with_lambda = (r_hi >= r_lo);
-    const double r_min = ret_increases_with_lambda ? r_lo : r_hi;
-    const double r_max = ret_increases_with_lambda ? r_hi : r_lo;
-    const double lam_at_r_min = ret_increases_with_lambda ? lo_lam : hi_lam;
-    const double lam_at_r_max = ret_increases_with_lambda ? hi_lam : lo_lam;
-
-    if (target_return >= r_max) {
-        auto r = optimizeFor(data, lam_at_r_max);
-        r.status_message =
-            "Target return (" + std::to_string(target_return) +
-            ") exceeds max achievable; returning boundary portfolio";
-        return r;
-    }
-    if (target_return <= r_min) {
-        auto r = optimizeFor(data, lam_at_r_min);
-        r.status_message =
-            "Target return (" + std::to_string(target_return) +
-            ") below min achievable; returning boundary portfolio";
-        return r;
-    }
-
-    double log_lo = std::log(lo_lam), log_hi = std::log(hi_lam);
-    for (int iter = 0; iter < 60; ++iter) {
-        const double log_mid = 0.5 * (log_lo + log_hi);
-        const double r_mid = ret_at(std::exp(log_mid));
-        if (std::abs(r_mid - target_return) < 1e-6) {
-            auto r = optimizeFor(data, std::exp(log_mid));
-            r.status_message = "Target-return portfolio";
-            return r;
+    const auto srch = findLambdaForTarget(ret_at, target_return, lo_lam, hi_lam);
+    auto r = optimizeFor(data, srch.lambda);
+    if (srch.brackets == 0) {
+        if (target_return > srch.m_max) {
+            r.status_message =
+                "Target return (" + std::to_string(target_return) +
+                ") exceeds max achievable (" + std::to_string(srch.m_max) +
+                "); returning closest portfolio";
+        } else {
+            r.status_message =
+                "Target return (" + std::to_string(target_return) +
+                ") below min achievable (" + std::to_string(srch.m_min) +
+                "); returning closest portfolio";
         }
-        if ((r_mid < target_return) == ret_increases_with_lambda)
-            log_lo = log_mid; // increase λ
-        else
-            log_hi = log_mid; // decrease λ
+    } else if (srch.brackets > 1) {
+        r.status_message =
+            "Target-return portfolio (warning: " +
+            std::to_string(srch.brackets) +
+            " bracketing segments — λ → return is non-monotonic; selected "
+            "the bracket nearest the target)";
+    } else {
+        r.status_message = "Target-return portfolio";
     }
-    auto r = optimizeFor(data, std::exp(0.5 * (log_lo + log_hi)));
-    r.status_message = "Target-return portfolio (approximate)";
     return r;
 }
 

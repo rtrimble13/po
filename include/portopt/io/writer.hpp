@@ -31,6 +31,7 @@
  */
 
 #include "../types.hpp"
+#include "../black_litterman.hpp"   // BLModelOutput
 #include <filesystem>
 #include <ostream>
 #include <string>
@@ -91,9 +92,16 @@ void writeBLModel(const BLModelOutput& bl,
                   std::ostream&        out,
                   const WriterConfig&  cfg = {});
 
+/// Serialise a Black-Litterman model output to JSON.
+///
+/// When @p summary is true, the n×n posterior_cov / blended_cov / pick_matrix
+/// matrices are omitted — leaving only the per-asset / per-view scalar
+/// quantities. Use this from MCP tools to keep responses bounded for
+/// large universes.
 std::string blModelToJSON(const BLModelOutput& bl,
                           const AssetUniverse& assets,
-                          int indent = 2);
+                          int  indent  = 2,
+                          bool summary = false);
 
 } // namespace io
 } // namespace portopt

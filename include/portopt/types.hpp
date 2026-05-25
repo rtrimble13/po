@@ -9,12 +9,81 @@
  */
 
 #include <Eigen/Dense>
+#include <atomic>
+#include <chrono>
+#include <memory>
 #include <string>
 #include <vector>
 #include <optional>
 #include <stdexcept>
 
 namespace portopt {
+
+// ── Typed exception hierarchy (C4) ───────────────────────────────────────────
+//
+// All library failures derive from PortoptError. Each subclass carries a
+// stable machine-readable reason code in addition to the human-readable
+// message. The codes are intended to be consumed by MCP wrappers / LLM
+// agents so they can recover from infeasibility, validate inputs, or
+// re-prompt for a different configuration without parsing error strings.
+
+class PortoptError : public std::runtime_error {
+public:
+    PortoptError(std::string code, std::string message)
+        : std::runtime_error(std::move(message)), code_(std::move(code)) {}
+    const std::string& code() const noexcept { return code_; }
+private:
+    std::string code_;
+};
+
+class InvalidMarketData : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+class InvalidParameters : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+class InfeasibleProblem : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+class SolverDidNotConverge : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+class SolverCancelled : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+class SolverTimeout : public PortoptError {
+public:
+    using PortoptError::PortoptError;
+};
+
+// ── Cancellation token (C5) ──────────────────────────────────────────────────
+//
+// A lightweight, copyable handle that wraps a shared atomic flag. The
+// FISTA inner loop checks `isCancellationRequested()` between iterations.
+// `SolverConfig` and `MVOParameters` accept an optional CancellationToken
+// plus a timeout_ms; when either trips, the solver throws SolverCancelled
+// / SolverTimeout with the corresponding reason code.
+class CancellationToken {
+public:
+    CancellationToken() : flag_(std::make_shared<std::atomic<bool>>(false)) {}
+    void cancel() { if (flag_) flag_->store(true, std::memory_order_relaxed); }
+    bool isCancellationRequested() const {
+        return flag_ && flag_->load(std::memory_order_relaxed);
+    }
+    void reset() { if (flag_) flag_->store(false, std::memory_order_relaxed); }
+private:
+    std::shared_ptr<std::atomic<bool>> flag_;
+};
 
 // ── Convenience aliases ──────────────────────────────────────────────────────
 using Matrix = Eigen::MatrixXd;
@@ -29,6 +98,10 @@ struct Asset {
     double      expected_return{0.0}; ///< Annualised expected return (μ — see notes)
     double      market_cap{0.0};      ///< Market capitalisation (for BL prior)
     std::string sector;       ///< Optional group/sector label (e.g. "Technology")
+    /// Quote currency, e.g. "USD", "EUR", "JPY". Empty = treated as the base
+    /// currency. Used by portopt::fx helpers (B13) to compute hedged
+    /// returns and currency exposures.
+    std::string currency;
 };
 
 /// Collection of assets forming the investment universe.
@@ -58,6 +131,21 @@ struct PortfolioConstraints {
 
     // ── Linear group constraints (applied via penalty / soft enforcement) ─────
     std::vector<GroupConstraint> groups;
+
+    // ── Tracking-error constraint (B1) ───────────────────────────────────────
+    /// Maximum tracking-error variance against the benchmark:
+    ///   (w − b)' Σ (w − b) ≤ tracking_error_limit²
+    /// 0 = disabled. Requires MarketData::benchmark_weights to be set.
+    /// Internally converted to a quadratic group inequality whose enforcement
+    /// follows MVOParameters::hard_group_constraints / group_penalty.
+    double tracking_error_limit{0.0};
+
+    // ── Gross-exposure / leverage cap (B2) ────────────────────────────────────
+    /// Maximum Σ|w_i| ≤ gross_exposure_limit. 0 = disabled.
+    /// Approximated via a linear group constraint Σ s_i w_i ≤ L where
+    /// s_i = sign(w_i^current) (a fixed-point iteration is run if no
+    /// current_weights are supplied).
+    double gross_exposure_limit{0.0};
 
     // ── Convenience helpers ───────────────────────────────────────────────────
 
@@ -101,28 +189,38 @@ struct PortfolioConstraints {
 
     void validate(int n) const {
         if (lower_bounds.size() != n || upper_bounds.size() != n)
-            throw std::invalid_argument("Constraint dimension mismatch");
+            throw InvalidParameters("constraint_dimension_mismatch",
+                                     "Constraint dimension mismatch");
         if ((lower_bounds.array() > upper_bounds.array()).any())
-            throw std::invalid_argument("lower_bounds must be <= upper_bounds");
+            throw InvalidParameters(
+                "lower_exceeds_upper_bound",
+                "lower_bounds must be <= upper_bounds");
         // Budget feasibility: sum(lb) ≤ budget ≤ sum(ub)
         double lb_sum = lower_bounds.sum();
         double ub_sum = upper_bounds.sum();
         if (budget < lb_sum - 1e-9 || budget > ub_sum + 1e-9)
-            throw std::invalid_argument(
+            throw InfeasibleProblem(
+                "budget_outside_bounds",
                 "Infeasible: budget=" + std::to_string(budget) +
                 " not in [sum(lb)=" + std::to_string(lb_sum) +
                 ", sum(ub)=" + std::to_string(ub_sum) + "]");
         if (current_weights.size() != 0 && current_weights.size() != n)
-            throw std::invalid_argument("current_weights size mismatch");
+            throw InvalidParameters("current_weights_size_mismatch",
+                                     "current_weights size mismatch");
         if (turnover_penalty < 0.0)
-            throw std::invalid_argument("turnover_penalty must be >= 0");
+            throw InvalidParameters("negative_turnover_penalty",
+                                     "turnover_penalty must be >= 0");
         for (const auto& g : groups) {
             if (g.coefficients.size() != n)
-                throw std::invalid_argument(
-                    "Group constraint \"" + g.description + "\": coefficient size mismatch");
+                throw InvalidParameters(
+                    "group_coefficient_size_mismatch",
+                    "Group constraint \"" + g.description +
+                    "\": coefficient size mismatch");
             if (g.lower > g.upper)
-                throw std::invalid_argument(
-                    "Group constraint \"" + g.description + "\": lower > upper");
+                throw InvalidParameters(
+                    "group_lower_exceeds_upper",
+                    "Group constraint \"" + g.description +
+                    "\": lower > upper");
         }
     }
 };
@@ -139,10 +237,48 @@ struct MVOParameters {
     /// Risk-free rate (annualised). Used in Sharpe calculation: (μ_p − r_f)/σ.
     /// If expected_returns are already excess returns, leave this at 0.
     double risk_free_rate{0.0};
+    /// If true, `risk_free_rate` overrides MarketData::risk_free_rate even
+    /// when the override value is exactly 0.0.
+    bool   risk_free_rate_is_set{false};
 
     /// Penalty weight on group-constraint violations (soft enforcement).
     /// Set to 0 to disable group constraints, larger values enforce more strictly.
     double group_penalty{1e3};
+
+    // ── B6: transaction-cost model ───────────────────────────────────────────
+    /// Per-asset linear transaction cost coefficient. Cost paid:
+    ///   Σ_i linear_transaction_cost_i · |w_i − w_prev_i|
+    /// Requires PortfolioConstraints::current_weights to be populated.
+    Vector linear_transaction_cost;
+    /// Per-asset quadratic / market-impact coefficient (Almgren-Chriss style).
+    /// Cost paid:  Σ_i quadratic_transaction_cost_i · (w_i − w_prev_i)²
+    /// This composes additively with the L2 turnover penalty.
+    Vector quadratic_transaction_cost;
+
+    /// When true, enforce group constraints **exactly** via the augmented-
+    /// Lagrangian method (A5). `group_penalty` is then used as the *initial*
+    /// penalty weight κ₀; the multipliers are updated automatically until
+    /// every group bound is satisfied to `group_tolerance`.
+    bool   hard_group_constraints{false};
+
+    /// Maximum allowed violation per group constraint when
+    /// `hard_group_constraints` is true.
+    double group_tolerance{1e-6};
+
+    /// When true, max-Sharpe portfolio uses the analytical tangent QP fast
+    /// path (A3) whenever the constraints permit it (long-only, budget 1,
+    /// no binding upper bounds at the unconstrained tangent). When the fast
+    /// path is not applicable, falls back to the log-λ sweep + golden-
+    /// section refinement.
+    bool   use_tangent_reformulation{true};
+
+    // ── C5: cancellation + timeout ───────────────────────────────────────────
+    /// Caller-supplied cancellation handle. If set, the FISTA inner loop
+    /// polls it between iterations and throws SolverCancelled on request.
+    CancellationToken cancellation;
+    /// Soft deadline in milliseconds; 0 disables. When elapsed solver
+    /// time exceeds this, the inner loop throws SolverTimeout.
+    double timeout_ms{0.0};
 
     PortfolioConstraints constraints;
 };
@@ -213,6 +349,18 @@ struct OptimizationResult {
     Vector             gradient_at_optimum;   ///< Σw − λμ at the solution
     std::vector<int>   active_lower_bounds;   ///< Indices where w_i = lb_i
     std::vector<int>   active_upper_bounds;   ///< Indices where w_i = ub_i
+
+    // Solver convergence diagnostics
+    double             primal_residual{0.0};  ///< ‖w_{k+1} − w_k‖ at exit
+    double             kkt_residual{0.0};     ///< L∞ KKT optimality residual (see qp_solver.hpp)
+    double             dual_estimate{0.0};    ///< Estimated multiplier ν̂ on the budget constraint
+
+    // Audit trail (B16) — populated by the optimiser; stable across runs
+    // with identical inputs and library version. Use to verify
+    // reproducibility / detect data or parameter drift between runs.
+    std::string        library_version;    ///< portopt version string at solve time
+    std::string        input_hash;         ///< Hex digest of (μ, Σ, w_mkt, b, rf)
+    std::string        params_hash;        ///< Hex digest of (λ, lb, ub, budget, …)
 };
 
 /// A single point on the efficient frontier.

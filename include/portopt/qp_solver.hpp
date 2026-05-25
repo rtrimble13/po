@@ -30,6 +30,12 @@ struct SolverConfig {
     double budget{1.0};            ///< Budget constraint (sum of weights)
     bool   use_nesterov{true};     ///< Enable momentum acceleration
     Vector warm_start;             ///< Optional warm-start (empty = equal-weight)
+    /// Caller-supplied cancellation handle (C5). When triggered the solver
+    /// throws portopt::SolverCancelled at the next iteration boundary.
+    CancellationToken cancellation;
+    /// Soft deadline in milliseconds (C5); 0 disables. The solver throws
+    /// portopt::SolverTimeout when elapsed wall-time exceeds this value.
+    double timeout_ms{0.0};
 };
 
 /// Raw result from the QP solver.
@@ -40,6 +46,17 @@ struct SolverResult {
     bool   converged{false};
     double primal_residual{0.0};   ///< ||x_{k+1} - x_k||
     Vector gradient;               ///< ∇f(x*) = Qx* + f
+
+    /// L∞ KKT residual of the box+budget QP at x*. Specifically:
+    ///   r_i = g_i − ν̂  for indices where x_i is strictly interior,
+    ///   r_i = max(0, ν̂ − g_i)  where x_i = lb_i,
+    ///   r_i = max(0, g_i − ν̂)  where x_i = ub_i,
+    /// and `kkt_residual = max_i |r_i|`. Smaller is more optimal.
+    double kkt_residual{0.0};
+
+    /// Estimate of the Lagrange multiplier ν̂ on the budget constraint
+    /// (recovered from g_i for indices strictly interior to [lb_i, ub_i]).
+    double dual_estimate{0.0};
 };
 
 /**
@@ -87,6 +104,36 @@ SolverResult solveWithGroups(const Matrix&                        Q,
                              const std::vector<GroupConstraint>&  groups,
                              double                               group_penalty,
                              const SolverConfig&                  cfg = {});
+
+/**
+ * @brief Solve the box-simplex QP with hard group inequality constraints (A5).
+ *
+ * Uses the augmented-Lagrangian / method-of-multipliers wrapped around the
+ * penalty-based inner solver. The bound shift `(λ_g/κ)` on each group is
+ * updated between outer iterations so that, at convergence, each group
+ * constraint `lo_g ≤ a_g'x ≤ hi_g` is satisfied to @p tolerance without
+ * driving κ to infinity.
+ *
+ * @param Q                 Symmetric PSD cost matrix
+ * @param f                 Linear cost vector
+ * @param lb, ub            Box bounds
+ * @param groups            Linear group constraints to enforce hard
+ * @param initial_penalty   κ₀, starting penalty weight (e.g. 1e3)
+ * @param tolerance         Maximum allowed violation of each group bound
+ * @param max_outer_iters   Hard cap on outer (multiplier-update) iterations
+ * @param cfg               Inner-solver configuration
+ *
+ * If @p groups is empty, this reduces to a plain `solve()` call.
+ */
+SolverResult solveWithHardGroups(const Matrix&                        Q,
+                                 const Vector&                        f,
+                                 const Vector&                        lb,
+                                 const Vector&                        ub,
+                                 const std::vector<GroupConstraint>&  groups,
+                                 double                               initial_penalty = 1e3,
+                                 double                               tolerance       = 1e-6,
+                                 int                                  max_outer_iters = 30,
+                                 const SolverConfig&                  cfg             = {});
 
 /**
  * @brief Compute the largest eigenvalue of @p M via power iteration.

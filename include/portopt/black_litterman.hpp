@@ -56,6 +56,15 @@ struct BLModelOutput {
     Vector view_returns;        ///< q
     Matrix view_uncertainty;    ///< Ω (full matrix — diagonal under both modes)
     Vector view_confidence_pct; ///< Reported confidence ∈ [0,1] for each view
+
+    /// Smallest singular value of P. Near-zero (≲ 1e-10) indicates
+    /// linearly dependent / collinear views — the posterior is ill-defined.
+    double pick_matrix_min_singular{0.0};
+    /// Condition number (σ_max / σ_min) of the posterior covariance Σ_BL.
+    /// Large values (≳ 1e10) indicate the posterior is ill-conditioned.
+    double posterior_condition_number{0.0};
+    /// Numerical rank of the pick matrix P (singular values > 1e-10 · σ_max).
+    int    pick_matrix_rank{0};
 };
 
 /**

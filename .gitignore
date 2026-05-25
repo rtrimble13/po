@@ -1,0 +1,25 @@
+# CMake build artifacts
+build/
+build-*/
+cmake-build-*/
+
+# Compiled extensions
+*.o
+*.so
+*.a
+*.dylib
+*.dll
+*.pyd
+
+# Python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+# Locally-copied pybind11 module — installed under build/python/
+python/portopt/_portopt*.so
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store

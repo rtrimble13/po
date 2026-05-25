@@ -97,3 +97,80 @@ TEST_CASE("fromReturns rejects unknown shrinkage", "[estimation][from_returns]")
     Matrix R = syntheticReturns(50, 2, 8);
     CHECK_THROWS(fromReturns({"A","B"}, R, 252.0, "magic"));
 }
+
+// ── A8: Missing-data (NaN / Inf) rejection ────────────────────────────────────
+
+TEST_CASE("sampleCovariance rejects NaN with actionable message",
+          "[estimation][nan]") {
+    Matrix R = syntheticReturns(50, 3, 11);
+    R(5, 1) = std::numeric_limits<double>::quiet_NaN();
+    CHECK_THROWS_AS(sampleCovariance(R), std::invalid_argument);
+}
+
+TEST_CASE("Shrinkage estimators reject Inf inputs", "[estimation][nan]") {
+    Matrix R = syntheticReturns(50, 3, 12);
+    R(0, 0) = std::numeric_limits<double>::infinity();
+    CHECK_THROWS_AS(ledoitWolfShrinkage(R, 252.0), std::invalid_argument);
+    CHECK_THROWS_AS(oasShrinkage(R, 252.0), std::invalid_argument);
+}
+
+// ── A6: Ledoit-Wolf δ is stable across sample sizes ───────────────────────────
+//
+// Without an external reference here we anchor on internal sanity:
+// (1) δ̂ is deterministic for a fixed seed,
+// (2) it lies in [0, 1],
+// (3) it shrinks toward 1 as T decreases (more noise → more shrinkage).
+
+// ── B14: EWMA covariance ──────────────────────────────────────────────────────
+
+TEST_CASE("EWMA covariance is symmetric and PSD", "[estimation][ewma]") {
+    Matrix R = syntheticReturns(500, 4, 17);
+    Matrix S = ewmaCovariance(R, 0.94, 252.0);
+    REQUIRE(S.rows() == 4);
+    REQUIRE(S.cols() == 4);
+    CHECK((S - S.transpose()).cwiseAbs().maxCoeff() < 1e-12);
+    Eigen::SelfAdjointEigenSolver<Matrix> es(S);
+    CHECK(es.eigenvalues().minCoeff() > -1e-10);
+}
+
+TEST_CASE("EWMA covariance weights recent observations more heavily",
+          "[estimation][ewma]") {
+    // Build a returns matrix where only the last K rows have variance,
+    // earlier rows are zero. A lower λ (more aggressive decay) should
+    // produce a larger covariance than a higher λ — the recent vol
+    // dominates more.
+    const int T = 500, n = 2;
+    Matrix R = Matrix::Zero(T, n);
+    std::mt19937 rng(99);
+    std::normal_distribution<double> nd(0.0, 0.02);
+    for (int t = T - 20; t < T; ++t)
+        for (int i = 0; i < n; ++i) R(t, i) = nd(rng);
+
+    Matrix S_fast = ewmaCovariance(R, 0.80, 1.0);  // fast decay
+    Matrix S_slow = ewmaCovariance(R, 0.99, 1.0);  // slow decay
+    // Sum of diagonals (total variance) should be larger under fast decay
+    CHECK(S_fast.diagonal().sum() > S_slow.diagonal().sum());
+}
+
+TEST_CASE("EWMA rejects bad lambda", "[estimation][ewma]") {
+    Matrix R = syntheticReturns(100, 2, 19);
+    CHECK_THROWS(ewmaCovariance(R, 0.0, 1.0));
+    CHECK_THROWS(ewmaCovariance(R, 1.0, 1.0));
+    CHECK_THROWS(ewmaCovariance(R, -0.1, 1.0));
+}
+
+TEST_CASE("Ledoit-Wolf δ̂ grows as T shrinks", "[estimation][lw]") {
+    const int n = 5;
+    Matrix R_large = syntheticReturns(2000, n, 13);
+    Matrix R_small = syntheticReturns(50,   n, 13);
+
+    double d_large = 0.0, d_small = 0.0;
+    (void)ledoitWolfShrinkage(R_large, 252.0, &d_large);
+    (void)ledoitWolfShrinkage(R_small, 252.0, &d_small);
+
+    CHECK(d_large >= 0.0);
+    CHECK(d_large <= 1.0);
+    CHECK(d_small >= 0.0);
+    CHECK(d_small <= 1.0);
+    CHECK(d_small > d_large);   // less data ⇒ more shrinkage
+}

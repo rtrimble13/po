@@ -107,6 +107,20 @@ std::string resultToJSON(const OptimizationResult& r, int indent) {
             {"upper", r.active_upper_bounds}
         };
     }
+    json conv;
+    conv["primal_residual"] = r.primal_residual;
+    conv["kkt_residual"]    = r.kkt_residual;
+    conv["dual_estimate"]   = r.dual_estimate;
+    j["convergence"] = conv;
+
+    if (!r.library_version.empty() || !r.input_hash.empty() ||
+        !r.params_hash.empty()) {
+        json audit;
+        audit["library_version"] = r.library_version;
+        audit["input_hash"]      = r.input_hash;
+        audit["params_hash"]     = r.params_hash;
+        j["audit"] = audit;
+    }
     return j.dump(indent);
 }
 
@@ -369,7 +383,8 @@ void writeFrontier(const EfficientFrontier& frontier,
 
 std::string blModelToJSON(const BLModelOutput& bl,
                            const AssetUniverse& assets,
-                           int indent) {
+                           int indent,
+                           bool summary) {
     const int n = static_cast<int>(bl.prior_returns.size());
     const int k = static_cast<int>(bl.view_returns.size());
 
@@ -416,9 +431,19 @@ std::string blModelToJSON(const BLModelOutput& bl,
         views_arr.push_back(std::move(v));
     }
     j["views"] = views_arr;
-    j["pick_matrix"]      = matToArr(bl.pick_matrix);
-    j["posterior_cov"]    = matToArr(bl.posterior_cov);
-    j["blended_cov"]      = matToArr(bl.blended_cov);
+    if (!summary) {
+        j["pick_matrix"]      = matToArr(bl.pick_matrix);
+        j["posterior_cov"]    = matToArr(bl.posterior_cov);
+        j["blended_cov"]      = matToArr(bl.blended_cov);
+    } else {
+        j["matrices_omitted"] = true;
+    }
+
+    json diag;
+    diag["pick_matrix_rank"]           = bl.pick_matrix_rank;
+    diag["pick_matrix_min_singular"]   = bl.pick_matrix_min_singular;
+    diag["posterior_condition_number"] = bl.posterior_condition_number;
+    j["diagnostics"] = diag;
 
     return j.dump(indent);
 }

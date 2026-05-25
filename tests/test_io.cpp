@@ -133,7 +133,7 @@ TEST_CASE("resultToCSV — produces valid CSV", "[io][writer][csv]") {
     r.metrics.volatility      = 0.20;
 
     auto csv = resultToCSV(r);
-    CHECK(csv.find("ticker,name,weight") != std::string::npos);
+    CHECK(csv.find("ticker,name,sector,weight") != std::string::npos);
     CHECK(csv.find("X,Asset X") != std::string::npos);
 }
 
@@ -178,7 +178,7 @@ TEST_CASE("frontierToCSV — has correct columns", "[io][writer][frontier]") {
     auto csv = frontierToCSV(ef);
     CHECK(csv.find("risk_aversion") != std::string::npos);
     CHECK(csv.find("volatility") != std::string::npos);
-    CHECK(csv.find(",A,") != std::string::npos || csv.find(",A") != std::string::npos);
+    CHECK((csv.find(",A,") != std::string::npos || csv.find(",A") != std::string::npos));
 }
 
 // ── BL constraints lookup ────────────────────────────────────────────────────
@@ -333,6 +333,53 @@ TEST_CASE("JSON market data includes benchmark and rf", "[io][json][benchmark]")
     REQUIRE(md.benchmark_weights.has_value());
     CHECK((*md.benchmark_weights)[0] == Approx(0.4));
     CHECK(md.risk_free_rate == Approx(0.03));
+}
+
+TEST_CASE("JSON market data parses asset currency", "[io][json][currency]") {
+    std::string j = R"({
+        "assets": [
+            {"ticker": "A", "expected_return": 0.10, "currency": "USD"},
+            {"ticker": "B", "expected_return": 0.15, "currency": "EUR"}
+        ],
+        "covariance": [[0.04, 0.01], [0.01, 0.09]]
+    })";
+    auto md = readMarketDataFromJSON(j);
+    REQUIRE(md.assets.size() == 2);
+    CHECK(md.assets[0].currency == "USD");
+    CHECK(md.assets[1].currency == "EUR");
+}
+
+TEST_CASE("MVO JSON reader parses extended fields", "[io][mvo][json][extended]") {
+    std::string js = R"({
+        "mvo": {
+            "risk_free_rate": 0.0,
+            "risk_free_rate_is_set": true,
+            "group_penalty": 100.0,
+            "hard_group_constraints": true,
+            "group_tolerance": 1e-5,
+            "use_tangent_reformulation": false,
+            "linear_transaction_cost": [0.001, 0.002],
+            "quadratic_transaction_cost": [0.01, 0.02],
+            "timeout_ms": 250.0,
+            "constraints": {
+                "lower_bounds": [0.0, 0.0],
+                "upper_bounds": [1.0, 1.0],
+                "tracking_error_limit": 0.05,
+                "gross_exposure_limit": 1.2
+            }
+        }
+    })";
+    auto p = readMVOParametersFromJSON(js);
+    CHECK(p.risk_free_rate == Approx(0.0));
+    CHECK(p.risk_free_rate_is_set);
+    CHECK(p.hard_group_constraints);
+    CHECK(p.group_tolerance == Approx(1e-5));
+    CHECK(!p.use_tangent_reformulation);
+    REQUIRE(p.linear_transaction_cost.size() == 2);
+    REQUIRE(p.quadratic_transaction_cost.size() == 2);
+    CHECK(p.timeout_ms == Approx(250.0));
+    CHECK(p.constraints.tracking_error_limit == Approx(0.05));
+    CHECK(p.constraints.gross_exposure_limit == Approx(1.2));
 }
 
 TEST_CASE("frontierToJSON — serialises correctly", "[io][writer][frontier]") {

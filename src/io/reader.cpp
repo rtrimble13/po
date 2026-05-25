@@ -101,6 +101,7 @@ MarketData readMarketDataFromJSON(const std::string& json_str) {
         asset.expected_return = a.value("expected_return", 0.0);
         asset.market_cap      = a.value("market_cap", 0.0);
         asset.sector          = a.value("sector", std::string{});
+        asset.currency        = a.value("currency", std::string{});
         data.assets.push_back(std::move(asset));
     }
 
@@ -386,6 +387,8 @@ static void parseConstraintsJSON(const json& c, PortfolioConstraints& out) {
     out.allow_short_selling = c.value("allow_short_selling", out.allow_short_selling);
     out.budget              = c.value("budget", out.budget);
     out.turnover_penalty    = c.value("turnover_penalty", out.turnover_penalty);
+    out.tracking_error_limit = c.value("tracking_error_limit", out.tracking_error_limit);
+    out.gross_exposure_limit = c.value("gross_exposure_limit", out.gross_exposure_limit);
     if (c.contains("current_weights")) {
         const auto& cw = c["current_weights"];
         out.current_weights = Vector(static_cast<int>(cw.size()));
@@ -425,6 +428,8 @@ static void parseConstraintsTOML(const toml::table& c, PortfolioConstraints& out
         out.allow_short_selling = *v;
     if (auto v = c["budget"].value<double>()) out.budget = *v;
     if (auto v = c["turnover_penalty"].value<double>()) out.turnover_penalty = *v;
+    if (auto v = c["tracking_error_limit"].value<double>()) out.tracking_error_limit = *v;
+    if (auto v = c["gross_exposure_limit"].value<double>()) out.gross_exposure_limit = *v;
     if (auto* cw = c["current_weights"].as_array()) {
         out.current_weights = Vector(static_cast<int>(cw->size()));
         for (int i = 0; i < static_cast<int>(cw->size()); ++i)
@@ -457,8 +462,32 @@ static MVOParameters parseMVOFromJSON(const json& j) {
     p.frontier_points   = j.value("frontier_points",   p.frontier_points);
     p.min_risk_aversion = j.value("min_risk_aversion", p.min_risk_aversion);
     p.max_risk_aversion = j.value("max_risk_aversion", p.max_risk_aversion);
-    p.risk_free_rate    = j.value("risk_free_rate",    p.risk_free_rate);
+    p.risk_free_rate_is_set =
+        j.value("risk_free_rate_is_set", p.risk_free_rate_is_set);
+    if (j.contains("risk_free_rate")) {
+        p.risk_free_rate = j["risk_free_rate"].get<double>();
+        p.risk_free_rate_is_set = true;
+    }
     p.group_penalty     = j.value("group_penalty",     p.group_penalty);
+    p.hard_group_constraints =
+        j.value("hard_group_constraints", p.hard_group_constraints);
+    p.group_tolerance =
+        j.value("group_tolerance", p.group_tolerance);
+    p.use_tangent_reformulation =
+        j.value("use_tangent_reformulation", p.use_tangent_reformulation);
+    p.timeout_ms = j.value("timeout_ms", p.timeout_ms);
+    if (j.contains("linear_transaction_cost")) {
+        const auto& tc = j["linear_transaction_cost"];
+        p.linear_transaction_cost = Vector(static_cast<int>(tc.size()));
+        for (int i = 0; i < static_cast<int>(tc.size()); ++i)
+            p.linear_transaction_cost[i] = tc[i].get<double>();
+    }
+    if (j.contains("quadratic_transaction_cost")) {
+        const auto& tc = j["quadratic_transaction_cost"];
+        p.quadratic_transaction_cost = Vector(static_cast<int>(tc.size()));
+        for (int i = 0; i < static_cast<int>(tc.size()); ++i)
+            p.quadratic_transaction_cost[i] = tc[i].get<double>();
+    }
 
     if (j.contains("constraints"))
         parseConstraintsJSON(j["constraints"], p.constraints);
@@ -471,8 +500,31 @@ static MVOParameters parseMVOFromTOML(const toml::table& t) {
     if (auto v = t["frontier_points"].value<int64_t>())  p.frontier_points = static_cast<int>(*v);
     if (auto v = t["min_risk_aversion"].value<double>()) p.min_risk_aversion = *v;
     if (auto v = t["max_risk_aversion"].value<double>()) p.max_risk_aversion = *v;
-    if (auto v = t["risk_free_rate"].value<double>())    p.risk_free_rate = *v;
+    if (auto v = t["risk_free_rate_is_set"].value<bool>())
+        p.risk_free_rate_is_set = *v;
+    if (auto v = t["risk_free_rate"].value<double>()) {
+        p.risk_free_rate = *v;
+        p.risk_free_rate_is_set = true;
+    }
     if (auto v = t["group_penalty"].value<double>())     p.group_penalty = *v;
+    if (auto v = t["hard_group_constraints"].value<bool>())
+        p.hard_group_constraints = *v;
+    if (auto v = t["group_tolerance"].value<double>())
+        p.group_tolerance = *v;
+    if (auto v = t["use_tangent_reformulation"].value<bool>())
+        p.use_tangent_reformulation = *v;
+    if (auto v = t["timeout_ms"].value<double>())
+        p.timeout_ms = *v;
+    if (auto* tc = t["linear_transaction_cost"].as_array()) {
+        p.linear_transaction_cost = Vector(static_cast<int>(tc->size()));
+        for (int i = 0; i < static_cast<int>(tc->size()); ++i)
+            p.linear_transaction_cost[i] = tc->get(i)->value_or(0.0);
+    }
+    if (auto* tc = t["quadratic_transaction_cost"].as_array()) {
+        p.quadratic_transaction_cost = Vector(static_cast<int>(tc->size()));
+        for (int i = 0; i < static_cast<int>(tc->size()); ++i)
+            p.quadratic_transaction_cost[i] = tc->get(i)->value_or(0.0);
+    }
     if (auto* c = t["constraints"].as_table())
         parseConstraintsTOML(*c, p.constraints);
     return p;
@@ -496,6 +548,12 @@ MVOParameters readMVOParameters(const std::filesystem::path& path, Format fmt) {
     }
 
     throw std::invalid_argument("readMVOParameters: unsupported format");
+}
+
+MVOParameters readMVOParametersFromJSON(const std::string& json_str) {
+    json j = json::parse(json_str);
+    const json& node = j.contains("mvo") ? j["mvo"] : j;
+    return parseMVOFromJSON(node);
 }
 
 // ── Black-Litterman parameter readers ────────────────────────────────────────
@@ -611,6 +669,12 @@ BlackLittermanParameters readBLParameters(const std::filesystem::path& path,
     }
 
     throw std::invalid_argument("readBLParameters: unsupported format");
+}
+
+BlackLittermanParameters readBLParametersFromJSON(const std::string& json_str) {
+    json j = json::parse(json_str);
+    const json& node = j.contains("black_litterman") ? j["black_litterman"] : j;
+    return parseBLFromJSON(node, j);
 }
 
 } // namespace io

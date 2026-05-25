@@ -2,6 +2,7 @@
 #include <portopt/logging.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <numeric>
 #include <stdexcept>
@@ -175,9 +176,31 @@ static SolverResult solveImpl(const Matrix&                        Q,
         return g;
     };
 
+    // C5: cancellation + timeout checks. Polled every iteration; throws
+    // portopt::SolverCancelled / SolverTimeout with a stable reason code
+    // when triggered so the caller (and any MCP wrapper) can react.
+    const auto start = std::chrono::steady_clock::now();
+    auto check_cancel = [&]() {
+        if (cfg.cancellation.isCancellationRequested())
+            throw SolverCancelled(
+                "solver_cancelled",
+                "QP solver cancelled by caller via CancellationToken");
+        if (cfg.timeout_ms > 0.0) {
+            const double elapsed_ms =
+                std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count();
+            if (elapsed_ms > cfg.timeout_ms)
+                throw SolverTimeout(
+                    "solver_timeout",
+                    "QP solver exceeded timeout_ms=" +
+                    std::to_string(cfg.timeout_ms));
+        }
+    };
+
     if (!cfg.use_nesterov) {
         // Plain projected gradient
         for (int iter = 0; iter < cfg.max_iterations; ++iter) {
+            check_cancel();
             const Vector grad = gradient(w);
             const Vector w_new = projectOntoSimplex(w - grad / L, cfg.budget, lb, ub);
             const double residual = (w_new - w).norm();
@@ -200,6 +223,7 @@ static SolverResult solveImpl(const Matrix&                        Q,
         double t = 1.0;
 
         for (int iter = 0; iter < cfg.max_iterations; ++iter) {
+            check_cancel();
             const Vector grad = gradient(y);
             const Vector w_new = projectOntoSimplex(y - grad / L, cfg.budget, lb, ub);
             const double t_new = 0.5 * (1.0 + std::sqrt(1.0 + 4.0 * t * t));
@@ -225,17 +249,77 @@ static SolverResult solveImpl(const Matrix&                        Q,
         }
     }
 
-    if (!result.converged)
-        log::warn("QP solver did not converge in {} iterations (residual={:.2e})",
-                  cfg.max_iterations, result.primal_residual);
-
     result.x         = w;
     result.gradient  = gradient(w);
     result.objective = 0.5 * w.dot(Q * w) + f.dot(w)
                      + groupPenaltyValue(w, groups, group_penalty);
 
-    log::debug("QP done: obj={:.6f} converged={} iters={}",
-               result.objective, result.converged, result.iterations);
+    // ── KKT residual ─────────────────────────────────────────────────────────
+    // For   min 0.5 x'Qx + f'x   s.t.  1'x = b,  lb ≤ x ≤ ub
+    // the stationarity condition is  g = Qx + f = ν·1 + μ_l − μ_u
+    // with μ_l, μ_u ≥ 0 and complementary slackness. From any strictly
+    // interior coordinate we read off ν directly; from bound-active
+    // coordinates we get bounds on it. We estimate ν̂ from the interior
+    // coordinates (median for robustness; falls back to a midpoint when
+    // all coordinates are bound-active) and then compute the per-index
+    // residual as described in SolverResult::kkt_residual.
+    {
+        const Vector& g = result.gradient;
+        // Use a relative tolerance for "interior".
+        const double bound_tol = 1e-8 *
+            std::max(1.0, (ub - lb).cwiseAbs().maxCoeff());
+        std::vector<double> interior_g;
+        interior_g.reserve(static_cast<std::size_t>(n));
+        for (int i = 0; i < n; ++i) {
+            if (w[i] > lb[i] + bound_tol && w[i] < ub[i] - bound_tol)
+                interior_g.push_back(g[i]);
+        }
+        double nu_hat = 0.0;
+        if (!interior_g.empty()) {
+            std::sort(interior_g.begin(), interior_g.end());
+            nu_hat = interior_g[interior_g.size() / 2];
+        } else {
+            // No interior coordinates — pick ν̂ that minimises the L∞
+            // residual: the midpoint of (max g_i where ub-active,
+            // min g_i where lb-active).
+            double hi_bound = -std::numeric_limits<double>::infinity();
+            double lo_bound =  std::numeric_limits<double>::infinity();
+            for (int i = 0; i < n; ++i) {
+                if (w[i] >= ub[i] - bound_tol) hi_bound = std::max(hi_bound, g[i]);
+                if (w[i] <= lb[i] + bound_tol) lo_bound = std::min(lo_bound, g[i]);
+            }
+            if (std::isfinite(hi_bound) && std::isfinite(lo_bound))
+                nu_hat = 0.5 * (hi_bound + lo_bound);
+            else if (std::isfinite(hi_bound))
+                nu_hat = hi_bound;
+            else if (std::isfinite(lo_bound))
+                nu_hat = lo_bound;
+        }
+
+        double r_inf = 0.0;
+        for (int i = 0; i < n; ++i) {
+            double r_i;
+            if (w[i] > lb[i] + bound_tol && w[i] < ub[i] - bound_tol)
+                r_i = std::abs(g[i] - nu_hat);
+            else if (w[i] >= ub[i] - bound_tol)
+                r_i = std::max(0.0, g[i] - nu_hat);
+            else  // w[i] ≈ lb[i]
+                r_i = std::max(0.0, nu_hat - g[i]);
+            r_inf = std::max(r_inf, r_i);
+        }
+        result.kkt_residual  = r_inf;
+        result.dual_estimate = nu_hat;
+    }
+
+    if (!result.converged)
+        log::warn("QP solver did not converge in {} iterations "
+                  "(primal_res={:.2e}, kkt_res={:.2e})",
+                  cfg.max_iterations, result.primal_residual,
+                  result.kkt_residual);
+
+    log::debug("QP done: obj={:.6f} converged={} iters={} kkt={:.2e}",
+               result.objective, result.converged, result.iterations,
+               result.kkt_residual);
 
     return result;
 }
@@ -256,6 +340,95 @@ SolverResult solveWithGroups(const Matrix&                        Q,
                              double                               group_penalty,
                              const SolverConfig&                  cfg) {
     return solveImpl(Q, f, lb, ub, groups, group_penalty, cfg);
+}
+
+// ── Augmented-Lagrangian wrapper for hard group constraints (A5) ──────────────
+//
+// For each inequality g: lo_g ≤ a_g'x ≤ hi_g, introduce non-negative multipliers
+// μ⁺_g, μ⁻_g. The augmented Lagrangian:
+//     L_κ(x, μ) = 0.5 x'Qx + f'x
+//                 + Σ_g κ/2 · [max(0, a_g'x - hi_g + μ⁺_g/κ)² - (μ⁺_g/κ)²]
+//                 + Σ_g κ/2 · [max(0, lo_g - a_g'x + μ⁻_g/κ)² - (μ⁻_g/κ)²]
+// Inner step: minimise L_κ over x at fixed μ — equivalent to the existing
+// penalty solver with each bound shifted by μ/κ. Outer update:
+//     μ⁺_g ← max(0, μ⁺_g + κ·(a_g'x − hi_g))
+//     μ⁻_g ← max(0, μ⁻_g + κ·(lo_g − a_g'x))
+// If max violation across all groups doesn't shrink, raise κ by 10×.
+
+SolverResult solveWithHardGroups(const Matrix&                        Q,
+                                 const Vector&                        f,
+                                 const Vector&                        lb,
+                                 const Vector&                        ub,
+                                 const std::vector<GroupConstraint>&  groups,
+                                 double                               initial_penalty,
+                                 double                               tolerance,
+                                 int                                  max_outer_iters,
+                                 const SolverConfig&                  cfg) {
+    if (groups.empty())
+        return solveImpl(Q, f, lb, ub, {}, 0.0, cfg);
+
+    const std::size_t G = groups.size();
+    std::vector<double> mu_up(G, 0.0);
+    std::vector<double> mu_lo(G, 0.0);
+    double kappa = std::max(1.0, initial_penalty);
+
+    SolverResult last;
+    SolverConfig inner_cfg = cfg;
+    double prev_viol = std::numeric_limits<double>::infinity();
+    const double kappa_growth = 10.0;
+    const double kappa_max    = 1e10;
+
+    for (int outer = 0; outer < max_outer_iters; ++outer) {
+        // Build shifted-bound groups for this iteration
+        std::vector<GroupConstraint> shifted;
+        shifted.reserve(G);
+        for (std::size_t g = 0; g < G; ++g) {
+            GroupConstraint s = groups[g];
+            // Shift bounds towards feasibility by μ/κ
+            s.upper = groups[g].upper - mu_up[g] / kappa;
+            s.lower = groups[g].lower + mu_lo[g] / kappa;
+            shifted.push_back(std::move(s));
+        }
+
+        // Warm-start successive inner solves from the previous x
+        if (outer > 0 && last.x.size() > 0) inner_cfg.warm_start = last.x;
+
+        last = solveImpl(Q, f, lb, ub, shifted, kappa, inner_cfg);
+
+        // Compute worst violation under the *original* bounds
+        double max_viol = 0.0;
+        for (std::size_t g = 0; g < G; ++g) {
+            const double ax = groups[g].coefficients.dot(last.x);
+            const double vu = std::max(0.0, ax - groups[g].upper);
+            const double vl = std::max(0.0, groups[g].lower - ax);
+            max_viol = std::max(max_viol, std::max(vu, vl));
+        }
+
+        log::debug("AugLag outer={} kappa={:.2e} max_viol={:.2e}",
+                   outer, kappa, max_viol);
+
+        if (max_viol < tolerance) {
+            last.converged = last.converged && true;
+            return last;
+        }
+
+        // Multiplier update
+        for (std::size_t g = 0; g < G; ++g) {
+            const double ax = groups[g].coefficients.dot(last.x);
+            mu_up[g] = std::max(0.0, mu_up[g] + kappa * (ax - groups[g].upper));
+            mu_lo[g] = std::max(0.0, mu_lo[g] + kappa * (groups[g].lower - ax));
+        }
+
+        // If violation didn't shrink meaningfully, raise the penalty
+        if (max_viol > 0.25 * prev_viol && kappa < kappa_max)
+            kappa = std::min(kappa_max, kappa * kappa_growth);
+        prev_viol = max_viol;
+    }
+
+    log::warn("solveWithHardGroups: outer loop did not fully converge "
+              "(max_viol={:.2e}, target={:.2e})", prev_viol, tolerance);
+    last.converged = false;
+    return last;
 }
 
 } // namespace qp

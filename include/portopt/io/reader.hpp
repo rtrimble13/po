@@ -86,6 +86,11 @@ MarketData readReturnsCSV(const std::filesystem::path& returns_csv,
 MVOParameters readMVOParameters(const std::filesystem::path& path,
                                 Format fmt = Format::Auto);
 
+/// In-memory MVO parameter reader (C2 — MCP-friendly).
+/// The JSON string follows the same schema as the file reader and may
+/// be wrapped in an outer `{"mvo": {...}}` or be the bare parameters.
+MVOParameters readMVOParametersFromJSON(const std::string& json_str);
+
 /**
  * @brief Read Black-Litterman parameters from a JSON or TOML file.
  *
@@ -94,6 +99,11 @@ MVOParameters readMVOParameters(const std::filesystem::path& path,
  */
 BlackLittermanParameters readBLParameters(const std::filesystem::path& path,
                                           Format fmt = Format::Auto);
+
+/// In-memory Black-Litterman parameter reader (C2 — MCP-friendly).
+/// The JSON string may be wrapped in `{"black_litterman": {...}}` or be
+/// the bare parameters.
+BlackLittermanParameters readBLParametersFromJSON(const std::string& json_str);
 
 } // namespace io
 } // namespace portopt

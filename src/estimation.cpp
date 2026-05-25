@@ -8,12 +8,34 @@
 namespace portopt {
 namespace estimation {
 
+// Reject NaN / Inf in a returns matrix with an actionable message.
+// We do not silently impute or use pairwise covariance here — callers
+// should clean missing data upstream (drop / forward-fill / EM).
+static void rejectNonFinite(const Matrix& returns, const char* fn) {
+    if (!returns.allFinite()) {
+        // Locate the first offending cell to give the caller a hint.
+        const int T = static_cast<int>(returns.rows());
+        const int n = static_cast<int>(returns.cols());
+        for (int t = 0; t < T; ++t)
+            for (int i = 0; i < n; ++i)
+                if (!std::isfinite(returns(t, i)))
+                    throw std::invalid_argument(
+                        std::string(fn) +
+                        ": returns matrix contains non-finite value at row " +
+                        std::to_string(t) + ", column " + std::to_string(i) +
+                        " (value=" + std::to_string(returns(t, i)) +
+                        "). Drop or impute missing observations before "
+                        "passing returns to the estimator.");
+    }
+}
+
 // ── Basic moments ────────────────────────────────────────────────────────────
 
 Vector sampleMean(const Matrix& returns, double periods_per_year) {
     const int T = static_cast<int>(returns.rows());
     if (T == 0)
         throw std::invalid_argument("sampleMean: empty returns matrix");
+    rejectNonFinite(returns, "sampleMean");
     return (returns.colwise().mean() * periods_per_year).transpose();
 }
 
@@ -22,6 +44,7 @@ Matrix sampleCovariance(const Matrix& returns, bool unbiased,
     const int T = static_cast<int>(returns.rows());
     if (T < 2)
         throw std::invalid_argument("sampleCovariance: need at least 2 periods");
+    rejectNonFinite(returns, "sampleCovariance");
 
     const Vector mean = returns.colwise().mean().transpose();
     const Matrix centered = returns.rowwise() - mean.transpose();
@@ -57,6 +80,7 @@ Matrix ledoitWolfShrinkage(const Matrix& returns, double periods_per_year,
     const int n = static_cast<int>(returns.cols());
     if (T < 2)
         throw std::invalid_argument("ledoitWolfShrinkage: need at least 2 periods");
+    rejectNonFinite(returns, "ledoitWolfShrinkage");
 
     const Vector mean = returns.colwise().mean().transpose();
     const Matrix X = returns.rowwise() - mean.transpose();
@@ -85,31 +109,44 @@ Matrix ledoitWolfShrinkage(const Matrix& returns, double periods_per_year,
         }
     }
 
-    // π = (1/T) Σ_t Σ_{ij} (x_{ti} x_{tj} − S_{ij})²
-    double pi_hat = 0.0;
-    Matrix X2 = X.array().square();
-    Matrix pi_mat = (X2.transpose() * X2) / static_cast<double>(T) -
-                    2.0 * S.cwiseProduct(
-                        (X.transpose() * X) / static_cast<double>(T)) +
-                    S.cwiseProduct(S);
-    pi_hat = pi_mat.sum();
+    // π̂ — Ledoit-Wolf 2004 Lemma 4 estimator of asymptotic variance of S.
+    //   π̂_{ij} = (1/T) Σ_t (x_{ti} x_{tj} − S_{ij})²
+    //   π̂     = Σ_{ij} π̂_{ij}
+    const Matrix X2 = X.array().square();
+    const Matrix pi_mat =
+        (X2.transpose() * X2) / static_cast<double>(T)
+      - 2.0 * S.cwiseProduct((X.transpose() * X) / static_cast<double>(T))
+      + S.cwiseProduct(S);
+    const double pi_hat = pi_mat.sum();
 
-    // ρ — off-diagonal contributions w.r.t. constant-correlation target
-    // Use the simplified Ledoit-Wolf "pi - rho" form:
-    //   rho ≈ Σ_i π_{ii} + Σ_{i≠j} (avg_corr / 2) * (sqrt(S_{jj}/S_{ii}) * π̂_{iijj} + ...)
-    // For practical use, approximate rho by the diagonal of pi_mat (this is
-    // the most commonly cited form for the constant-correlation target).
+    // ρ̂ — closed-form estimator from Ledoit-Wolf 2004 (matches the
+    // reference MATLAB code at https://www.ledoit.net/honey.pdf, which
+    // scikit-learn's `LedoitWolf` mirrors). Earlier versions of this
+    // file used a self-described "simplified" approximation that
+    // mis-weighted the off-diagonal cross-terms and biased δ̂.
+    //
+    // The off-diagonal asymptotic covariance involves
+    //   θ̂_{ii,ij} = (1/T) Σ_t x_{ti}³ x_{tj} − S_{ii} · S_{ij}
+    // and the constant-correlation contribution is
+    //   r̄/2 · ( sqrt(σ_{jj}/σ_{ii}) · θ̂_{ii,ij}
+    //         + sqrt(σ_{ii}/σ_{jj}) · θ̂_{jj,ij} )
+    // which by i↔j symmetry collapses to r̄ · sqrt(σ_{jj}/σ_{ii}) · θ̂_{ii,ij}
+    // summed over i≠j. Diagonal (i=j) contributions are π̂_{ii}.
+    const Matrix X3 = X.array().cube();
+    const Matrix term1 = (X3.transpose() * X) / static_cast<double>(T);
+    Matrix term2(n, n);
+    for (int i = 0; i < n; ++i)
+        for (int j = 0; j < n; ++j)
+            term2(i, j) = S(i, i) * S(i, j);
+
     double rho_hat = pi_mat.diagonal().sum();
-    // Add off-diagonal cross-term approximation
     for (int i = 0; i < n; ++i) {
+        if (stds[i] < 1e-15) continue;
         for (int j = 0; j < n; ++j) {
             if (i == j) continue;
-            if (stds[i] < 1e-15 || stds[j] < 1e-15) continue;
-            const double term =
-                0.5 * avg_corr *
-                ((stds[j] / stds[i]) * pi_mat(i, i) +
-                 (stds[i] / stds[j]) * pi_mat(j, j));
-            rho_hat += term;
+            if (stds[j] < 1e-15) continue;
+            const double w_ij = stds[j] / stds[i];   // sqrt(σ_jj/σ_ii)
+            rho_hat += avg_corr * w_ij * (term1(i, j) - term2(i, j));
         }
     }
 
@@ -137,6 +174,7 @@ Matrix oasShrinkage(const Matrix& returns, double periods_per_year,
     const int n = static_cast<int>(returns.cols());
     if (T < 2)
         throw std::invalid_argument("oasShrinkage: need at least 2 periods");
+    rejectNonFinite(returns, "oasShrinkage");
 
     const Vector mean = returns.colwise().mean().transpose();
     const Matrix X = returns.rowwise() - mean.transpose();
@@ -161,6 +199,39 @@ Matrix oasShrinkage(const Matrix& returns, double periods_per_year,
     log::debug("OAS shrinkage: delta={:.4f}", delta);
 
     return periods_per_year * ((1.0 - delta) * S + delta * F);
+}
+
+// ── Exponentially-weighted covariance (B14, RiskMetrics-style) ───────────────
+
+Matrix ewmaCovariance(const Matrix& returns, double lambda,
+                      double periods_per_year) {
+    const int T = static_cast<int>(returns.rows());
+    const int n = static_cast<int>(returns.cols());
+    if (T < 2)
+        throw std::invalid_argument("ewmaCovariance: need at least 2 periods");
+    if (lambda <= 0.0 || lambda >= 1.0)
+        throw std::invalid_argument("ewmaCovariance: lambda must be in (0, 1)");
+    rejectNonFinite(returns, "ewmaCovariance");
+
+    // Exponentially-weighted mean and covariance, computed in one pass
+    // newest-to-oldest so that the latest observation receives weight
+    // (1 − λ) and earlier observations decay geometrically.
+    Vector mean = Vector::Zero(n);
+    Matrix S    = Matrix::Zero(n, n);
+    double total_w = 0.0;
+    double w = 1.0 - lambda;
+    for (int t = T - 1; t >= 0; --t) {
+        const Vector r = returns.row(t).transpose();
+        mean   += w * r;
+        S      += w * (r * r.transpose());
+        total_w += w;
+        w *= lambda;
+    }
+    mean /= total_w;
+    S    /= total_w;
+    S    -= mean * mean.transpose();
+
+    return periods_per_year * S;
 }
 
 // ── MarketData factory ───────────────────────────────────────────────────────
@@ -199,10 +270,19 @@ MarketData fromReturns(const std::vector<std::string>& tickers,
         data.covariance = ledoitWolfShrinkage(returns, periods_per_year);
     } else if (s == "oas") {
         data.covariance = oasShrinkage(returns, periods_per_year);
+    } else if (s == "ewma") {
+        // `shrinkage_delta` is repurposed as the EWMA decay λ when ewma is
+        // selected (defaults to 0.94 if the caller leaves the field at its
+        // 0.2 default — RiskMetrics' daily convention).
+        const double ewma_lambda = (shrinkage_delta > 0.0 &&
+                                    shrinkage_delta < 1.0 &&
+                                    shrinkage_delta != 0.2)
+                                       ? shrinkage_delta : 0.94;
+        data.covariance = ewmaCovariance(returns, ewma_lambda, periods_per_year);
     } else {
         throw std::invalid_argument(
             "fromReturns: unknown shrinkage \"" + shrinkage +
-            "\" (expected: none | linear | ledoit-wolf | oas)");
+            "\" (expected: none | linear | ledoit-wolf | oas | ewma)");
     }
 
     // Reflect μ back into per-asset expected_return

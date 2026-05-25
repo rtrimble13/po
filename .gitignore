@@ -23,3 +23,6 @@ python/portopt/_portopt*.so
 .idea/
 *.swp
 .DS_Store
+
+# Testing
+tests/Testing

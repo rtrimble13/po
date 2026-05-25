@@ -117,6 +117,14 @@ from . import analytics       # noqa: F401
 from . import backtest        # noqa: F401
 from . import attribution     # noqa: F401
 
+# C3: Pydantic schemas — opt-in (only imported when pydantic is available).
+# C7: Reference MCP tool dispatcher depends on schemas.
+try:
+    from . import schemas         # noqa: F401
+    from . import mcp_server      # noqa: F401
+except ImportError:
+    pass                          # pydantic not installed; schemas not available
+
 # ── C1: dict ↔ struct helpers (MCP-friendly) ─────────────────────────────────
 # These thin wrappers let callers (especially MCP servers) build/inspect
 # parameter objects entirely through Python dicts, without touching the

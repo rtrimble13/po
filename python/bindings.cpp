@@ -49,16 +49,22 @@ PYBIND11_MODULE(_portopt, m) {
     static py::exception<SolverDidNotConverge> ex_nc  (m, "SolverDidNotConverge",    ex_base.ptr());
     static py::exception<SolverCancelled>      ex_can (m, "SolverCancelled",         ex_base.ptr());
     static py::exception<SolverTimeout>        ex_to  (m, "SolverTimeout",           ex_base.ptr());
+    // PyErr_SetString carries only a string; we prefix every portopt error
+    // with `[code]` so Python wrappers can parse the machine-readable code
+    // back out alongside the human message.
     py::register_exception_translator([](std::exception_ptr p) {
+        auto with_code = [](const PortoptError& e) {
+            return std::string("[") + e.code() + "] " + e.what();
+        };
         if (!p) return;
         try { std::rethrow_exception(p); }
-        catch (const SolverTimeout&        e) { PyErr_SetString(ex_to.ptr(),  e.what()); }
-        catch (const SolverCancelled&      e) { PyErr_SetString(ex_can.ptr(), e.what()); }
-        catch (const SolverDidNotConverge& e) { PyErr_SetString(ex_nc.ptr(),  e.what()); }
-        catch (const InfeasibleProblem&    e) { PyErr_SetString(ex_inf.ptr(), e.what()); }
-        catch (const InvalidParameters&    e) { PyErr_SetString(ex_ip.ptr(),  e.what()); }
-        catch (const InvalidMarketData&    e) { PyErr_SetString(ex_imd.ptr(), e.what()); }
-        catch (const PortoptError&         e) { PyErr_SetString(ex_base.ptr(),e.what()); }
+        catch (const SolverTimeout&        e) { PyErr_SetString(ex_to.ptr(),  with_code(e).c_str()); }
+        catch (const SolverCancelled&      e) { PyErr_SetString(ex_can.ptr(), with_code(e).c_str()); }
+        catch (const SolverDidNotConverge& e) { PyErr_SetString(ex_nc.ptr(),  with_code(e).c_str()); }
+        catch (const InfeasibleProblem&    e) { PyErr_SetString(ex_inf.ptr(), with_code(e).c_str()); }
+        catch (const InvalidParameters&    e) { PyErr_SetString(ex_ip.ptr(),  with_code(e).c_str()); }
+        catch (const InvalidMarketData&    e) { PyErr_SetString(ex_imd.ptr(), with_code(e).c_str()); }
+        catch (const PortoptError&         e) { PyErr_SetString(ex_base.ptr(),with_code(e).c_str()); }
     });
 
     // ── CancellationToken (C5) ────────────────────────────────────────────────
@@ -347,19 +353,45 @@ PYBIND11_MODULE(_portopt, m) {
         .def_readonly("posterior_condition_number", &BLModelOutput::posterior_condition_number);
 
     // ── MVOptimizer ───────────────────────────────────────────────────────────
-    py::class_<MVOptimizer>(m, "MVOptimizer")
+    py::class_<MVOptimizer>(m, "MVOptimizer",
+        "Mean-Variance Optimiser (Markowitz, 1952).\n\n"
+        "Solves  min w'Σw − λ μ'w  subject to budget, box, group, and\n"
+        "optional turnover / transaction-cost / tracking-error /\n"
+        "gross-exposure constraints.")
         .def(py::init<MVOParameters>(),
-             py::arg("params") = MVOParameters{})
-        .def("optimize", &MVOptimizer::optimize, py::arg("data"))
-        .def("efficient_frontier", &MVOptimizer::efficientFrontier, py::arg("data"))
-        .def("min_variance_portfolio", &MVOptimizer::minVariancePortfolio, py::arg("data"))
-        .def("max_sharpe_portfolio",   &MVOptimizer::maxSharpePortfolio,   py::arg("data"))
+             py::arg("params") = MVOParameters{},
+             "Construct an optimiser with the supplied parameters "
+             "(default: long-only with λ=1).")
+        .def("optimize", &MVOptimizer::optimize, py::arg("data"),
+             "Compute the MVO-optimal portfolio. Returns an "
+             "OptimizationResult with weights, metrics, and convergence "
+             "diagnostics. Throws InvalidMarketData / InfeasibleProblem / "
+             "SolverCancelled / SolverTimeout on error.")
+        .def("efficient_frontier", &MVOptimizer::efficientFrontier,
+             py::arg("data"),
+             "Trace the efficient frontier by sweeping λ logarithmically "
+             "from min_risk_aversion to max_risk_aversion across "
+             "frontier_points steps. Returns an EfficientFrontier.")
+        .def("min_variance_portfolio", &MVOptimizer::minVariancePortfolio,
+             py::arg("data"),
+             "Minimum-variance portfolio (λ → 0). Long-only by default.")
+        .def("max_sharpe_portfolio", &MVOptimizer::maxSharpePortfolio,
+             py::arg("data"),
+             "Maximum-Sharpe (tangency) portfolio. Uses the analytical "
+             "Σ⁻¹(μ-rf) fast path when constraints permit (A3); falls "
+             "back to log-λ sweep + golden-section refinement otherwise.")
         .def("optimize_for_target_volatility",
              &MVOptimizer::optimizeForTargetVolatility,
-             py::arg("data"), py::arg("target_volatility"))
+             py::arg("data"), py::arg("target_volatility"),
+             "Find the portfolio whose realised volatility is closest to "
+             "target_volatility. Robust to non-monotonic λ→vol behaviour "
+             "via frontier-bracket bisection (A4).")
         .def("optimize_for_target_return",
              &MVOptimizer::optimizeForTargetReturn,
-             py::arg("data"), py::arg("target_return"))
+             py::arg("data"), py::arg("target_return"),
+             "Find the portfolio whose expected return is closest to "
+             "target_return. Same frontier-bracket bisection as "
+             "optimize_for_target_volatility.")
         .def("set_parameters", &MVOptimizer::setParameters, py::arg("params"))
         .def_property("parameters",
             [](const MVOptimizer& o) { return o.parameters(); },
@@ -375,13 +407,25 @@ PYBIND11_MODULE(_portopt, m) {
                     py::arg("data"));
 
     // ── BlackLittermanOptimizer ───────────────────────────────────────────────
-    py::class_<BlackLittermanOptimizer>(m, "BlackLittermanOptimizer")
+    py::class_<BlackLittermanOptimizer>(m, "BlackLittermanOptimizer",
+        "Black-Litterman portfolio optimiser. Combines the market "
+        "equilibrium prior π = δΣw_mkt with investor views P·μ ~ N(q,Ω) to "
+        "produce posterior expected returns, then feeds them into MVO.")
         .def(py::init<BlackLittermanParameters>(),
-             py::arg("params") = BlackLittermanParameters{})
-        .def("optimize", &BlackLittermanOptimizer::optimize, py::arg("data"))
+             py::arg("params") = BlackLittermanParameters{},
+             "Construct a BL optimiser with the supplied parameters.")
+        .def("optimize", &BlackLittermanOptimizer::optimize, py::arg("data"),
+             "Compute the BL-optimal portfolio. Requires "
+             "MarketData.market_weights for the prior.")
         .def("efficient_frontier", &BlackLittermanOptimizer::efficientFrontier,
-             py::arg("data"))
-        .def("model_output", &BlackLittermanOptimizer::modelOutput, py::arg("data"));
+             py::arg("data"),
+             "Trace the BL efficient frontier (posterior returns and "
+             "blended covariance).")
+        .def("model_output", &BlackLittermanOptimizer::modelOutput,
+             py::arg("data"),
+             "Return the BL diagnostic block — prior π, posterior μ_BL, "
+             "Σ_BL, pick matrix P, Ω, view-confidence percentages, plus "
+             "rank/condition-number checks (A7).");
 
     // ── Estimation ────────────────────────────────────────────────────────────
     py::module_ est = m.def_submodule("estimation",

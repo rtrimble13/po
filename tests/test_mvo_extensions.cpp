@@ -432,3 +432,130 @@ TEST_CASE("MVO honours lb = ub (pinned positions)", "[mvo][tight_bounds]") {
     CHECK(r.weights[1] == Approx(0.10).margin(1e-6));
     CHECK(r.weights.sum() == Approx(1.0).margin(1e-6));
 }
+
+// ── A3: max-Sharpe analytical tangent fast path ──────────────────────────────
+
+TEST_CASE("Max-Sharpe analytical tangent matches closed form (no bounds binding)",
+          "[mvo][max_sharpe][a3]") {
+    // Hand-built 2-asset problem with a known closed-form tangent.
+    MarketData d;
+    d.assets = { {"A", "A", 0.10, 1e11, ""}, {"B", "B", 0.05, 1e11, ""} };
+    d.expected_returns = Vector(2); d.expected_returns << 0.10, 0.05;
+    d.covariance = Matrix(2, 2);
+    d.covariance << 0.04, 0.01, 0.01, 0.02;
+    d.risk_free_rate = 0.02;
+
+    // Closed-form tangent: y = Σ⁻¹(μ − rf), w = y / sum(y)
+    const Vector excess = d.expected_returns -
+                          Vector::Constant(2, d.risk_free_rate);
+    Vector y_ref = d.covariance.ldlt().solve(excess);
+    Vector w_ref = y_ref / y_ref.sum();
+
+    MVOParameters p;
+    p.constraints = PortfolioConstraints::longOnly(2);
+    MVOptimizer opt(p);
+    auto r = opt.maxSharpePortfolio(d);
+    REQUIRE(r.converged);
+    // Both weights should match closed form
+    CHECK(r.weights[0] == Approx(w_ref[0]).margin(1e-6));
+    CHECK(r.weights[1] == Approx(w_ref[1]).margin(1e-6));
+    // Status message should call out the analytical path
+    CHECK(r.status_message.find("analytical") != std::string::npos);
+}
+
+TEST_CASE("Max-Sharpe falls back to heuristic when bounds bind",
+          "[mvo][max_sharpe][a3]") {
+    auto data = fiveAssets();
+    data.risk_free_rate = 0.03;
+
+    MVOParameters p;
+    p.constraints = PortfolioConstraints::longOnly(5);
+    // Force a binding upper bound so analytical tangent fails feasibility
+    p.constraints.upper_bounds = Vector::Constant(5, 0.20);
+    MVOptimizer opt(p);
+    auto r = opt.maxSharpePortfolio(data);
+    REQUIRE(r.converged);
+    for (int i = 0; i < 5; ++i)
+        CHECK(r.weights[i] <= 0.20 + 1e-6);
+    // Should NOT have taken the analytical path
+    CHECK(r.status_message.find("analytical") == std::string::npos);
+}
+
+// ── A5: hard group constraints via augmented Lagrangian ──────────────────────
+
+TEST_CASE("Hard group constraint is enforced exactly (A5)", "[mvo][groups][a5]") {
+    auto data = fiveAssets();
+    MVOParameters p;
+    p.constraints   = PortfolioConstraints::longOnly(5);
+    p.risk_aversion = 2.0;
+
+    // Force the first two assets (the highest-return ones) into a sector cap
+    // that they would otherwise breach.
+    GroupConstraint g;
+    g.description  = "Tech ≤ 30%";
+    g.coefficients = Vector::Zero(5);
+    g.coefficients[0] = 1.0;
+    g.coefficients[1] = 1.0;
+    g.lower = 0.0;
+    g.upper = 0.30;
+    p.constraints.groups.push_back(g);
+
+    // Soft enforcement (baseline)
+    p.hard_group_constraints = false;
+    MVOptimizer soft(p);
+    auto rs = soft.optimize(data);
+
+    // Hard enforcement
+    p.hard_group_constraints = true;
+    p.group_tolerance        = 1e-7;
+    MVOptimizer hard(p);
+    auto rh = hard.optimize(data);
+    REQUIRE(rh.converged);
+    const double sum_hard = rh.weights[0] + rh.weights[1];
+    // Hard must satisfy the constraint to tolerance
+    CHECK(sum_hard <= 0.30 + 1e-6);
+    // Hard enforcement should never be less tight than soft
+    const double sum_soft = rs.weights[0] + rs.weights[1];
+    CHECK(sum_hard <= sum_soft + 1e-6);
+}
+
+// ── A10: additional pathological-input coverage ───────────────────────────────
+
+TEST_CASE("Singular covariance (perfect correlation) still produces feasible weights",
+          "[mvo][singular][a10]") {
+    MarketData d;
+    d.assets = { {"A","A",0.10,1e11,""}, {"B","B",0.10,1e11,""} };
+    d.expected_returns = Vector(2); d.expected_returns << 0.10, 0.10;
+    d.covariance = Matrix(2, 2);
+    // Rank-1: Σ = σ·σ' for some σ
+    d.covariance << 0.04, 0.04, 0.04, 0.04;
+
+    MVOParameters p;
+    p.constraints = PortfolioConstraints::longOnly(2);
+    p.risk_aversion = 2.0;
+    MVOptimizer opt(p);
+    REQUIRE_NOTHROW(opt.optimize(d));
+    auto r = opt.optimize(d);
+    CHECK(r.weights.sum() == Approx(1.0).margin(1e-6));
+    CHECK(r.weights[0] >= -1e-9);
+    CHECK(r.weights[1] >= -1e-9);
+}
+
+TEST_CASE("Extreme λ sweep does not crash or NaN out",
+          "[mvo][stress][a10]") {
+    auto data = fiveAssets();
+    MVOParameters p;
+    p.constraints = PortfolioConstraints::longOnly(5);
+    MVOptimizer opt(p);
+    for (double lam : { 1e-8, 1e-3, 1.0, 1e3, 1e6 }) {
+        p.risk_aversion = lam;
+        opt.setParameters(p);
+        auto r = opt.optimize(data);
+        REQUIRE(std::isfinite(r.weights.sum()));
+        CHECK(r.weights.sum() == Approx(1.0).margin(1e-5));
+        for (int i = 0; i < 5; ++i) {
+            CHECK(std::isfinite(r.weights[i]));
+            CHECK(r.weights[i] >= -1e-9);
+        }
+    }
+}

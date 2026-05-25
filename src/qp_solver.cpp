@@ -318,5 +318,94 @@ SolverResult solveWithGroups(const Matrix&                        Q,
     return solveImpl(Q, f, lb, ub, groups, group_penalty, cfg);
 }
 
+// ── Augmented-Lagrangian wrapper for hard group constraints (A5) ──────────────
+//
+// For each inequality g: lo_g ≤ a_g'x ≤ hi_g, introduce non-negative multipliers
+// μ⁺_g, μ⁻_g. The augmented Lagrangian:
+//     L_κ(x, μ) = 0.5 x'Qx + f'x
+//                 + Σ_g κ/2 · [max(0, a_g'x - hi_g + μ⁺_g/κ)² - (μ⁺_g/κ)²]
+//                 + Σ_g κ/2 · [max(0, lo_g - a_g'x + μ⁻_g/κ)² - (μ⁻_g/κ)²]
+// Inner step: minimise L_κ over x at fixed μ — equivalent to the existing
+// penalty solver with each bound shifted by μ/κ. Outer update:
+//     μ⁺_g ← max(0, μ⁺_g + κ·(a_g'x − hi_g))
+//     μ⁻_g ← max(0, μ⁻_g + κ·(lo_g − a_g'x))
+// If max violation across all groups doesn't shrink, raise κ by 10×.
+
+SolverResult solveWithHardGroups(const Matrix&                        Q,
+                                 const Vector&                        f,
+                                 const Vector&                        lb,
+                                 const Vector&                        ub,
+                                 const std::vector<GroupConstraint>&  groups,
+                                 double                               initial_penalty,
+                                 double                               tolerance,
+                                 int                                  max_outer_iters,
+                                 const SolverConfig&                  cfg) {
+    if (groups.empty())
+        return solveImpl(Q, f, lb, ub, {}, 0.0, cfg);
+
+    const std::size_t G = groups.size();
+    std::vector<double> mu_up(G, 0.0);
+    std::vector<double> mu_lo(G, 0.0);
+    double kappa = std::max(1.0, initial_penalty);
+
+    SolverResult last;
+    SolverConfig inner_cfg = cfg;
+    double prev_viol = std::numeric_limits<double>::infinity();
+    const double kappa_growth = 10.0;
+    const double kappa_max    = 1e10;
+
+    for (int outer = 0; outer < max_outer_iters; ++outer) {
+        // Build shifted-bound groups for this iteration
+        std::vector<GroupConstraint> shifted;
+        shifted.reserve(G);
+        for (std::size_t g = 0; g < G; ++g) {
+            GroupConstraint s = groups[g];
+            // Shift bounds towards feasibility by μ/κ
+            s.upper = groups[g].upper - mu_up[g] / kappa;
+            s.lower = groups[g].lower + mu_lo[g] / kappa;
+            shifted.push_back(std::move(s));
+        }
+
+        // Warm-start successive inner solves from the previous x
+        if (outer > 0 && last.x.size() > 0) inner_cfg.warm_start = last.x;
+
+        last = solveImpl(Q, f, lb, ub, shifted, kappa, inner_cfg);
+
+        // Compute worst violation under the *original* bounds
+        double max_viol = 0.0;
+        for (std::size_t g = 0; g < G; ++g) {
+            const double ax = groups[g].coefficients.dot(last.x);
+            const double vu = std::max(0.0, ax - groups[g].upper);
+            const double vl = std::max(0.0, groups[g].lower - ax);
+            max_viol = std::max(max_viol, std::max(vu, vl));
+        }
+
+        log::debug("AugLag outer={} kappa={:.2e} max_viol={:.2e}",
+                   outer, kappa, max_viol);
+
+        if (max_viol < tolerance) {
+            last.converged = last.converged && true;
+            return last;
+        }
+
+        // Multiplier update
+        for (std::size_t g = 0; g < G; ++g) {
+            const double ax = groups[g].coefficients.dot(last.x);
+            mu_up[g] = std::max(0.0, mu_up[g] + kappa * (ax - groups[g].upper));
+            mu_lo[g] = std::max(0.0, mu_lo[g] + kappa * (groups[g].lower - ax));
+        }
+
+        // If violation didn't shrink meaningfully, raise the penalty
+        if (max_viol > 0.25 * prev_viol && kappa < kappa_max)
+            kappa = std::min(kappa_max, kappa * kappa_growth);
+        prev_viol = max_viol;
+    }
+
+    log::warn("solveWithHardGroups: outer loop did not fully converge "
+              "(max_viol={:.2e}, target={:.2e})", prev_viol, tolerance);
+    last.converged = false;
+    return last;
+}
+
 } // namespace qp
 } // namespace portopt

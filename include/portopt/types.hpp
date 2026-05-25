@@ -144,6 +144,23 @@ struct MVOParameters {
     /// Set to 0 to disable group constraints, larger values enforce more strictly.
     double group_penalty{1e3};
 
+    /// When true, enforce group constraints **exactly** via the augmented-
+    /// Lagrangian method (A5). `group_penalty` is then used as the *initial*
+    /// penalty weight κ₀; the multipliers are updated automatically until
+    /// every group bound is satisfied to `group_tolerance`.
+    bool   hard_group_constraints{false};
+
+    /// Maximum allowed violation per group constraint when
+    /// `hard_group_constraints` is true.
+    double group_tolerance{1e-6};
+
+    /// When true, max-Sharpe portfolio uses the analytical tangent QP fast
+    /// path (A3) whenever the constraints permit it (long-only, budget 1,
+    /// no binding upper bounds at the unconstrained tangent). When the fast
+    /// path is not applicable, falls back to the log-λ sweep + golden-
+    /// section refinement.
+    bool   use_tangent_reformulation{true};
+
     PortfolioConstraints constraints;
 };
 

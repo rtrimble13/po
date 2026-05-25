@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -255,9 +256,17 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
     solver_cfg_.budget = cons.budget;
 
     const auto t0 = std::chrono::steady_clock::now();
-    qp::SolverResult qp = qp::solveWithGroups(
-        Q, f, cons.lower_bounds, cons.upper_bounds,
-        cons.groups, params_.group_penalty, solver_cfg_);
+    qp::SolverResult qp;
+    if (params_.hard_group_constraints && !cons.groups.empty()) {
+        qp = qp::solveWithHardGroups(
+            Q, f, cons.lower_bounds, cons.upper_bounds,
+            cons.groups, params_.group_penalty,
+            params_.group_tolerance, /*max_outer_iters=*/30, solver_cfg_);
+    } else {
+        qp = qp::solveWithGroups(
+            Q, f, cons.lower_bounds, cons.upper_bounds,
+            cons.groups, params_.group_penalty, solver_cfg_);
+    }
     const auto t1 = std::chrono::steady_clock::now();
 
     OptimizationResult result;
@@ -377,13 +386,87 @@ OptimizationResult MVOptimizer::minVariancePortfolio(const MarketData& data) {
     return r;
 }
 
+// ── A3: Analytical tangent fast path ────────────────────────────────────────
+//
+// For unconstrained long-only with budget=1, the tangent (max-Sharpe)
+// portfolio has the closed form:
+//     y* = Σ⁻¹(μ − rf·1),   w* = y* / 1'y*
+// When this w* satisfies the user-supplied box constraints `lb ≤ w ≤ ub`
+// and the budget, it IS the tangent portfolio — no sweep needed. We verify
+// feasibility post-hoc and fall back to the heuristic when bounds bind.
+static std::optional<Vector>
+tryAnalyticalTangent(const MarketData& data, double rf,
+                     const PortfolioConstraints& cons) {
+    const int n = static_cast<int>(data.assets.size());
+    const Vector excess = data.expected_returns -
+                          Vector::Constant(n, rf);
+
+    // If every excess return is non-positive there is no positive-Sharpe
+    // portfolio along this analytical path.
+    if (excess.maxCoeff() <= 0.0) return std::nullopt;
+
+    Eigen::LDLT<Matrix> ldlt(0.5 * (data.covariance +
+                                     data.covariance.transpose()));
+    if (ldlt.info() != Eigen::Success) return std::nullopt;
+    const Vector y = ldlt.solve(excess);
+    const double s = y.sum();
+    if (!std::isfinite(s) || std::abs(s) < 1e-12) return std::nullopt;
+    Vector w = y / s;
+    // Rescale to the user's budget (the unconstrained tangent normalises
+    // to 1'w = 1; if the user wants e.g. 130/30 or dollar-neutral the
+    // analytical path doesn't apply directly).
+    if (std::abs(cons.budget - 1.0) > 1e-9) return std::nullopt;
+
+    // Feasibility check against the box bounds.
+    for (int i = 0; i < n; ++i) {
+        if (w[i] < cons.lower_bounds[i] - 1e-9 ||
+            w[i] > cons.upper_bounds[i] + 1e-9)
+            return std::nullopt;
+    }
+    return w;
+}
+
 OptimizationResult MVOptimizer::maxSharpePortfolio(const MarketData& data) {
     validateData(data);
-
-    // Sweep λ and pick the highest-Sharpe point, refine via golden-section.
-    // This is robust to non-convex behaviour of Sharpe vs λ that arises
-    // when bounds are tight.
+    const int n = static_cast<int>(data.assets.size());
     const double rf = effectiveRiskFreeRate(params_, data);
+
+    // A3 fast path: analytical tangent when constraints don't bind.
+    if (params_.use_tangent_reformulation) {
+        PortfolioConstraints cons = params_.constraints;
+        if (cons.lower_bounds.size() != n || cons.upper_bounds.size() != n)
+            cons = PortfolioConstraints::longOnly(n);
+        if (auto w_opt = tryAnalyticalTangent(data, rf, cons)) {
+            OptimizationResult r;
+            r.weights = *w_opt;
+            r.assets  = data.assets;
+            r.method  = "MVO";
+            r.converged = true;
+            r.iterations = 0;
+            r.solve_time_ms = 0.0;
+            r.metrics = computeMetrics(*w_opt, data.expected_returns,
+                                       data.covariance, rf);
+            if (data.benchmark_weights.has_value() &&
+                data.benchmark_weights->size() == n) {
+                augmentBenchmarkMetrics(r.metrics, *w_opt,
+                                        data.expected_returns,
+                                        data.covariance,
+                                        *data.benchmark_weights, rf);
+            }
+            r.library_version = VERSION_STRING;
+            r.input_hash      = inputHash(data);
+            r.params_hash     = paramsHash(params_);
+            r.status_message  =
+                "Maximum-Sharpe (tangency) — analytical fast path (A3)";
+            log::info("MVO max-Sharpe via analytical tangent: sharpe={:.4f}",
+                      r.metrics.sharpe_ratio);
+            return r;
+        }
+    }
+
+    // Fallback: sweep λ and pick the highest-Sharpe point, refine via
+    // golden-section. Robust to non-convex Sharpe-vs-λ behaviour that
+    // arises when bounds bind.
 
     auto sharpe_at = [&](double lam) {
         auto r = optimizeFor(data, lam);

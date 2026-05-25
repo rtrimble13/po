@@ -498,6 +498,12 @@ MVOParameters readMVOParameters(const std::filesystem::path& path, Format fmt) {
     throw std::invalid_argument("readMVOParameters: unsupported format");
 }
 
+MVOParameters readMVOParametersFromJSON(const std::string& json_str) {
+    json j = json::parse(json_str);
+    const json& node = j.contains("mvo") ? j["mvo"] : j;
+    return parseMVOFromJSON(node);
+}
+
 // ── Black-Litterman parameter readers ────────────────────────────────────────
 
 static ViewConfidenceMode parseConfidenceMode(const std::string& s,
@@ -611,6 +617,12 @@ BlackLittermanParameters readBLParameters(const std::filesystem::path& path,
     }
 
     throw std::invalid_argument("readBLParameters: unsupported format");
+}
+
+BlackLittermanParameters readBLParametersFromJSON(const std::string& json_str) {
+    json j = json::parse(json_str);
+    const json& node = j.contains("black_litterman") ? j["black_litterman"] : j;
+    return parseBLFromJSON(node, j);
 }
 
 } // namespace io

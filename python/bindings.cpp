@@ -216,6 +216,27 @@ PYBIND11_MODULE(_portopt, m) {
         .def_readonly("points", &EfficientFrontier::points)
         .def_readonly("assets", &EfficientFrontier::assets)
         .def_readonly("method", &EfficientFrontier::method)
+        // C8 — pandas-free list-of-dicts. Each record contains the scalar
+        // metrics plus a `weights` dict keyed by ticker. Use this from MCP
+        // tools so the pandas import in to_dataframe() stays optional.
+        .def("to_records", [](const EfficientFrontier& ef) {
+            py::list records;
+            for (const auto& p : ef.points) {
+                py::dict rec;
+                rec["risk_aversion"]         = p.risk_aversion;
+                rec["expected_return"]       = p.metrics.expected_return;
+                rec["volatility"]            = p.metrics.volatility;
+                rec["sharpe_ratio"]          = p.metrics.sharpe_ratio;
+                rec["diversification_ratio"] = p.metrics.diversification_ratio;
+                rec["effective_n_assets"]    = p.metrics.effective_n_assets;
+                py::dict wts;
+                for (std::size_t i = 0; i < ef.assets.size(); ++i)
+                    wts[py::str(ef.assets[i].ticker)] = p.weights[i];
+                rec["weights"] = wts;
+                records.append(rec);
+            }
+            return records;
+        })
         .def("to_dataframe", [](const EfficientFrontier& ef) -> py::object {
             py::object pd = py::module_::import("pandas");
             std::vector<double> lambdas, rets, vols, sharpes, divr, eff_n;
@@ -374,6 +395,13 @@ PYBIND11_MODULE(_portopt, m) {
           [](const std::string& path) {
               return io::readBLParameters(std::filesystem::path(path));
           }, py::arg("path"));
+    // C2 — in-memory JSON readers (no temp files)
+    m.def("read_mvo_parameters_json", &io::readMVOParametersFromJSON,
+          py::arg("json_str"),
+          "Parse MVO parameters from a JSON string (no temp files).");
+    m.def("read_bl_parameters_json", &io::readBLParametersFromJSON,
+          py::arg("json_str"),
+          "Parse Black-Litterman parameters from a JSON string (no temp files).");
     m.def("result_to_json",
           [](const OptimizationResult& r, int indent) {
               return io::resultToJSON(r, indent);
@@ -389,9 +417,12 @@ PYBIND11_MODULE(_portopt, m) {
           [](const EfficientFrontier& ef) { return io::frontierToCSV(ef); },
           py::arg("frontier"));
     m.def("bl_model_to_json",
-          [](const BLModelOutput& bl, const std::vector<Asset>& assets, int indent) {
-              return io::blModelToJSON(bl, assets, indent);
-          }, py::arg("bl_model"), py::arg("assets"), py::arg("indent") = 2);
+          [](const BLModelOutput& bl, const std::vector<Asset>& assets,
+             int indent, bool summary) {
+              return io::blModelToJSON(bl, assets, indent, summary);
+          }, py::arg("bl_model"), py::arg("assets"),
+             py::arg("indent") = 2, py::arg("summary") = false,
+          "Serialise BL model to JSON. summary=True omits the n×n matrices.");
 
     // ── Convenience portfolios (B15) ──────────────────────────────────────────
     py::module_ pf = m.def_submodule("portfolios",

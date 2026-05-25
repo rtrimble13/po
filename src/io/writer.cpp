@@ -383,7 +383,8 @@ void writeFrontier(const EfficientFrontier& frontier,
 
 std::string blModelToJSON(const BLModelOutput& bl,
                            const AssetUniverse& assets,
-                           int indent) {
+                           int indent,
+                           bool summary) {
     const int n = static_cast<int>(bl.prior_returns.size());
     const int k = static_cast<int>(bl.view_returns.size());
 
@@ -430,9 +431,13 @@ std::string blModelToJSON(const BLModelOutput& bl,
         views_arr.push_back(std::move(v));
     }
     j["views"] = views_arr;
-    j["pick_matrix"]      = matToArr(bl.pick_matrix);
-    j["posterior_cov"]    = matToArr(bl.posterior_cov);
-    j["blended_cov"]      = matToArr(bl.blended_cov);
+    if (!summary) {
+        j["pick_matrix"]      = matToArr(bl.pick_matrix);
+        j["posterior_cov"]    = matToArr(bl.posterior_cov);
+        j["blended_cov"]      = matToArr(bl.blended_cov);
+    } else {
+        j["matrices_omitted"] = true;
+    }
 
     json diag;
     diag["pick_matrix_rank"]           = bl.pick_matrix_rank;

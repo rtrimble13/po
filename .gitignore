@@ -15,6 +15,8 @@ cmake-build-*/
 __pycache__/
 *.egg-info/
 .pytest_cache/
+# Locally-copied pybind11 module — installed under build/python/
+python/portopt/_portopt*.so
 
 # IDE
 .vscode/

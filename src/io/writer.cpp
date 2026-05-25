@@ -420,6 +420,12 @@ std::string blModelToJSON(const BLModelOutput& bl,
     j["posterior_cov"]    = matToArr(bl.posterior_cov);
     j["blended_cov"]      = matToArr(bl.blended_cov);
 
+    json diag;
+    diag["pick_matrix_rank"]           = bl.pick_matrix_rank;
+    diag["pick_matrix_min_singular"]   = bl.pick_matrix_min_singular;
+    diag["posterior_condition_number"] = bl.posterior_condition_number;
+    j["diagnostics"] = diag;
+
     return j.dump(indent);
 }
 

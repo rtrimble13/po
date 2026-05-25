@@ -91,11 +91,13 @@ TEST_CASE("BL — single view shifts posterior toward view", "[bl][view]") {
     BlackLittermanOptimizer bl(params);
     auto model = bl.modelOutput(data);
 
-    // View says equity outperforms bonds — posterior equity return should
-    // be higher relative to bonds than the prior
-    double prior_diff    = model.prior_returns[0]    - model.prior_returns[1];
-    double post_diff     = model.posterior_returns[0] - model.posterior_returns[1];
-    CHECK(post_diff > prior_diff - 1e-6);
+    // View says p'μ = 0.03 (equity − bonds = 3%); the prior says ~5.9%.
+    // The posterior should move CLOSER to the view than the prior was —
+    // direction is not assumed (view may be above or below prior).
+    const double q          = params.views[0].expected_return;
+    const double prior_diff = model.prior_returns[0]    - model.prior_returns[1];
+    const double post_diff  = model.posterior_returns[0] - model.posterior_returns[1];
+    CHECK(std::abs(post_diff - q) < std::abs(prior_diff - q));
 }
 
 TEST_CASE("BL — high confidence view pulls posterior strongly", "[bl][view]") {
@@ -222,7 +224,10 @@ TEST_CASE("BL — Idzorek mode: 0% confidence ≈ prior", "[bl][idzorek]") {
     v.pick_vector     = Vector::Zero(3);
     v.pick_vector[0]  = 1.0;
     v.expected_return = 100.0;  // wildly extreme
-    v.confidence      = 0.001;  // ~0% confident
+    // True "0% confident" in Idzorek requires confidence below the
+    // numerical clamp (1e-6); otherwise the formula ω = p'τΣp·(1/c − 1)
+    // still produces a finite Ω which lets an extreme q dominate.
+    v.confidence      = 1e-7;
     p.views.push_back(v);
 
     BlackLittermanOptimizer bl(p);

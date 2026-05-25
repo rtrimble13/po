@@ -52,8 +52,11 @@ python -c "import portopt; print(portopt.__version__)"
 
 ## CLI usage
 
+The CLI binary is `po`. (The Python module is still `import portopt` —
+only the user-facing command is shortened.)
+
 ```
-portopt <subcommand> [options]
+po <subcommand> [options]
 
 Subcommands:
   mvo            Single MVO-optimal portfolio
@@ -86,33 +89,33 @@ Common flags (most subcommands):
 
 ```bash
 # MVO — print to console
-portopt mvo -d assets.json
+po mvo -d assets.json
 
 # MVO — save to JSON with custom risk aversion from parameter file
-portopt mvo -d assets.json -p params.toml -o result.json
+po mvo -d assets.json -p params.toml -o result.json
 
 # Efficient frontier to CSV
-portopt frontier -d assets.json -p params.json -o frontier.csv
+po frontier -d assets.json -p params.json -o frontier.csv
 
 # Black-Litterman with model diagnostics
-portopt bl -d assets.json -p params.toml --show-model -o bl_result.json
+po bl -d assets.json -p params.toml --show-model -o bl_result.json
 
 # PM-friendly: minimum-variance / max-Sharpe / 15% target vol
-portopt min-variance -d assets.json
-portopt max-sharpe   -d assets.json --risk-free-rate 0.04
-portopt target-vol   -d assets.json --target 0.15
+po min-variance -d assets.json
+po max-sharpe   -d assets.json --risk-free-rate 0.04
+po target-vol   -d assets.json --target 0.15
 
 # Daily returns → MVO with Ledoit-Wolf shrinkage
-portopt mvo -d daily_returns.csv --returns --shrinkage ledoit-wolf
+po mvo -d daily_returns.csv --returns --shrinkage ledoit-wolf
 
 # Show dollar notionals on a $10M book, with active constraints explained
-portopt mvo -d assets.json --total-capital 10000000 --explain
+po mvo -d assets.json --total-capital 10000000 --explain
 
 # Windows console: use ASCII separators
-portopt mvo -d assets.json --ascii
+po mvo -d assets.json --ascii
 
 # Jupyter diagnostic report
-portopt report -d assets.json -p params.toml -o reports/
+po report -d assets.json -p params.toml -o reports/
 ```
 
 ## Python usage
@@ -285,7 +288,7 @@ python notebooks/generate_report.py \
 Or via the CLI:
 
 ```bash
-portopt report -d assets.json -p params.toml -o reports/
+po report -d assets.json -p params.toml -o reports/
 ```
 
 Produces: executed `.ipynb`, HTML report, and PNG figures in `reports/`.

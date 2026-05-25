@@ -133,7 +133,7 @@ TEST_CASE("resultToCSV — produces valid CSV", "[io][writer][csv]") {
     r.metrics.volatility      = 0.20;
 
     auto csv = resultToCSV(r);
-    CHECK(csv.find("ticker,name,weight") != std::string::npos);
+    CHECK(csv.find("ticker,name,sector,weight") != std::string::npos);
     CHECK(csv.find("X,Asset X") != std::string::npos);
 }
 
@@ -178,7 +178,7 @@ TEST_CASE("frontierToCSV — has correct columns", "[io][writer][frontier]") {
     auto csv = frontierToCSV(ef);
     CHECK(csv.find("risk_aversion") != std::string::npos);
     CHECK(csv.find("volatility") != std::string::npos);
-    CHECK(csv.find(",A,") != std::string::npos || csv.find(",A") != std::string::npos);
+    CHECK((csv.find(",A,") != std::string::npos || csv.find(",A") != std::string::npos));
 }
 
 // ── BL constraints lookup ────────────────────────────────────────────────────

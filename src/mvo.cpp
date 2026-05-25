@@ -15,6 +15,17 @@ MVOptimizer::MVOptimizer(MVOParameters params)
     solver_cfg_.use_nesterov   = true;
 }
 
+// Resolve the effective risk-free rate: an explicit non-zero
+// MVOParameters value overrides whatever is on the MarketData.
+// A zero in the params field is treated as "not set" — the data value
+// then applies. Used by both `optimizeFor` and `maxSharpePortfolio`
+// so the two call sites cannot drift.
+static double effectiveRiskFreeRate(const MVOParameters& params,
+                                    const MarketData& data) {
+    return (params.risk_free_rate != 0.0) ? params.risk_free_rate
+                                          : data.risk_free_rate;
+}
+
 // ── Validation ────────────────────────────────────────────────────────────────
 
 void MVOptimizer::validateMarketData(const MarketData& data) {
@@ -180,11 +191,7 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
     result.solve_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.gradient_at_optimum = qp.gradient;
 
-    // Use params_.risk_free_rate as an explicit override when provided;
-    // otherwise fall back to the market-data risk-free rate.
-    const double rf = (params_.risk_free_rate != 0.0)
-                        ? params_.risk_free_rate
-                        : data.risk_free_rate;
+    const double rf = effectiveRiskFreeRate(params_, data);
     result.metrics = computeMetrics(qp.x, data.expected_returns,
                                     data.covariance, rf);
 
@@ -292,7 +299,7 @@ OptimizationResult MVOptimizer::maxSharpePortfolio(const MarketData& data) {
     // Sweep λ and pick the highest-Sharpe point, refine via golden-section.
     // This is robust to non-convex behaviour of Sharpe vs λ that arises
     // when bounds are tight.
-    const double rf = data.risk_free_rate + params_.risk_free_rate;
+    const double rf = effectiveRiskFreeRate(params_, data);
 
     auto sharpe_at = [&](double lam) {
         auto r = optimizeFor(data, lam);

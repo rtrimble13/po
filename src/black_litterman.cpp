@@ -1,6 +1,9 @@
 #include <portopt/black_litterman.hpp>
 #include <portopt/logging.hpp>
 
+#include <Eigen/SVD>
+#include <Eigen/Eigenvalues>
+
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -27,9 +30,11 @@ void BlackLittermanOptimizer::validateData(const MarketData& data) const {
         throw std::invalid_argument("BL: market_weights size mismatch");
 
     const double mw_sum = data.market_weights->sum();
-    if (std::abs(mw_sum - 1.0) > 1e-4)
+    if (std::abs(mw_sum - 1.0) > 1e-6)
         throw std::invalid_argument(
-            "BL: market_weights must sum to 1 (got " + std::to_string(mw_sum) + ")");
+            "BL: market_weights must sum to 1 within 1e-6 (got " +
+            std::to_string(mw_sum) +
+            "). Renormalise w_mkt before passing it to the optimiser.");
 
     for (const auto& v : params_.views) {
         if (v.pick_vector.size() != n)
@@ -108,6 +113,15 @@ BLModelOutput BlackLittermanOptimizer::computeModel(const MarketData& data) cons
         out.view_returns         = Vector::Zero(0);
         out.view_uncertainty     = Matrix::Zero(0, 0);
         out.view_confidence_pct  = Vector::Zero(0);
+        out.pick_matrix_min_singular = 0.0;
+        out.pick_matrix_rank         = 0;
+        // Posterior cov is τΣ here; report its condition number.
+        Eigen::SelfAdjointEigenSolver<Matrix> es_prior(out.posterior_cov);
+        const double smin_p = es_prior.eigenvalues().minCoeff();
+        const double smax_p = es_prior.eigenvalues().maxCoeff();
+        out.posterior_condition_number =
+            (smin_p > 0.0) ? smax_p / smin_p
+                           : std::numeric_limits<double>::infinity();
         return out;
     }
 
@@ -144,16 +158,55 @@ BLModelOutput BlackLittermanOptimizer::computeModel(const MarketData& data) cons
     log::debug("BL pick matrix P ({}x{}), view returns q range [{:.4f},{:.4f}]",
                k, n, q.minCoeff(), q.maxCoeff());
 
+    // ── Pick-matrix conditioning ─────────────────────────────────────────────
+    // Detect linearly dependent / near-collinear views before they surface
+    // as an LDLT failure on M further down. A row that lies (approximately)
+    // in the row-space of the others has a singular value ≲ 1e-10 · σ_max.
+    Eigen::JacobiSVD<Matrix> svd(P);
+    const Vector svals = svd.singularValues();
+    const double smax_P = (svals.size() > 0) ? svals.maxCoeff() : 0.0;
+    const double smin_P = (svals.size() > 0) ? svals.minCoeff() : 0.0;
+    const double rank_tol = 1e-10 * std::max(1.0, smax_P);
+    int rank_P = 0;
+    for (int i = 0; i < svals.size(); ++i)
+        if (svals[i] > rank_tol) ++rank_P;
+    if (rank_P < k) {
+        log::warn("BL: pick matrix P is rank-deficient (rank={} of {} views, "
+                  "σ_min/σ_max={:.3e}). Posterior may be ill-conditioned; "
+                  "consider removing or merging the redundant view(s).",
+                  rank_P, k,
+                  (smax_P > 0.0) ? smin_P / smax_P
+                                  : std::numeric_limits<double>::quiet_NaN());
+    }
+
     // ── Step 3: Posterior covariance  ─────────────────────────────────────────
     const Matrix tauSigma_inv =
         tauSigma.ldlt().solve(Matrix::Identity(n, n));
     const Matrix M = tauSigma_inv + P.transpose() * Omega_inv * P;
 
     Eigen::LDLT<Matrix> ldlt(M);
-    if (ldlt.info() != Eigen::Success)
-        throw std::runtime_error("BL: posterior covariance is not positive definite");
+    if (ldlt.info() != Eigen::Success) {
+        std::string msg = "BL: posterior precision matrix M = (τΣ)⁻¹ + P'Ω⁻¹P "
+                          "is not positive definite";
+        if (rank_P < k)
+            msg += " (likely cause: " + std::to_string(k - rank_P) +
+                   " linearly dependent view(s); drop redundant rows of P)";
+        throw std::runtime_error(msg);
+    }
 
     const Matrix Sigma_BL = ldlt.solve(Matrix::Identity(n, n));
+
+    // Posterior condition number (σ_max / σ_min of Σ_BL).
+    Eigen::SelfAdjointEigenSolver<Matrix> es(Sigma_BL);
+    const double smin_post = es.eigenvalues().minCoeff();
+    const double smax_post = es.eigenvalues().maxCoeff();
+    const double cond_post = (smin_post > 0.0)
+        ? smax_post / smin_post
+        : std::numeric_limits<double>::infinity();
+    if (cond_post > 1e10)
+        log::warn("BL: posterior covariance Σ_BL is ill-conditioned "
+                  "(cond={:.2e}); results may be sensitive to view inputs.",
+                  cond_post);
 
     // ── Step 4: Posterior expected returns ────────────────────────────────────
     const Vector rhs   = tauSigma_inv * pi + P.transpose() * (Omega_inv * q);
@@ -174,6 +227,9 @@ BLModelOutput BlackLittermanOptimizer::computeModel(const MarketData& data) cons
     out.view_returns         = q;
     out.view_uncertainty     = Omega;
     out.view_confidence_pct  = confidence_pct;
+    out.pick_matrix_min_singular   = smin_P;
+    out.pick_matrix_rank           = rank_P;
+    out.posterior_condition_number = cond_post;
 
     return out;
 }

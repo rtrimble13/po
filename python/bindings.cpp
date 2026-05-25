@@ -253,14 +253,17 @@ PYBIND11_MODULE(_portopt, m) {
 
     // ── BLModelOutput ─────────────────────────────────────────────────────────
     py::class_<BLModelOutput>(m, "BLModelOutput")
-        .def_readonly("prior_returns",        &BLModelOutput::prior_returns)
-        .def_readonly("posterior_returns",    &BLModelOutput::posterior_returns)
-        .def_readonly("posterior_cov",        &BLModelOutput::posterior_cov)
-        .def_readonly("blended_cov",          &BLModelOutput::blended_cov)
-        .def_readonly("pick_matrix",          &BLModelOutput::pick_matrix)
-        .def_readonly("view_returns",         &BLModelOutput::view_returns)
-        .def_readonly("view_uncertainty",     &BLModelOutput::view_uncertainty)
-        .def_readonly("view_confidence_pct",  &BLModelOutput::view_confidence_pct);
+        .def_readonly("prior_returns",              &BLModelOutput::prior_returns)
+        .def_readonly("posterior_returns",          &BLModelOutput::posterior_returns)
+        .def_readonly("posterior_cov",              &BLModelOutput::posterior_cov)
+        .def_readonly("blended_cov",                &BLModelOutput::blended_cov)
+        .def_readonly("pick_matrix",                &BLModelOutput::pick_matrix)
+        .def_readonly("view_returns",               &BLModelOutput::view_returns)
+        .def_readonly("view_uncertainty",           &BLModelOutput::view_uncertainty)
+        .def_readonly("view_confidence_pct",        &BLModelOutput::view_confidence_pct)
+        .def_readonly("pick_matrix_rank",           &BLModelOutput::pick_matrix_rank)
+        .def_readonly("pick_matrix_min_singular",   &BLModelOutput::pick_matrix_min_singular)
+        .def_readonly("posterior_condition_number", &BLModelOutput::posterior_condition_number);
 
     // ── MVOptimizer ───────────────────────────────────────────────────────────
     py::class_<MVOptimizer>(m, "MVOptimizer")

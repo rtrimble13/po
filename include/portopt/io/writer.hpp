@@ -31,6 +31,7 @@
  */
 
 #include "../types.hpp"
+#include "../black_litterman.hpp"   // BLModelOutput
 #include <filesystem>
 #include <ostream>
 #include <string>

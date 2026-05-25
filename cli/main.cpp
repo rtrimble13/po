@@ -1,34 +1,34 @@
 /**
  * @file main.cpp
- * @brief portopt — Portfolio Optimisation CLI
+ * @brief po — Portfolio Optimisation CLI (frontend for the portopt library)
  *
  * Usage examples:
  *
  * MVO — single optimal portfolio:
- *   portopt mvo -d assets.json -p params.toml -o result.json
+ *   po mvo -d assets.json -p params.toml -o result.json
  *
  * MVO — efficient frontier:
- *   portopt frontier -d assets.json -p params.json -o frontier.csv
+ *   po frontier -d assets.json -p params.json -o frontier.csv
  *
  * Black-Litterman:
- *   portopt bl -d assets.json -p bl_params.toml -o result.json
+ *   po bl -d assets.json -p bl_params.toml -o result.json
  *
  * BL efficient frontier:
- *   portopt bl-frontier -d assets.json -p bl_params.toml -o frontier.csv
+ *   po bl-frontier -d assets.json -p bl_params.toml -o frontier.csv
  *
  * PM-friendly portfolios:
- *   portopt min-variance -d assets.json
- *   portopt max-sharpe   -d assets.json
- *   portopt target-vol   -d assets.json --target 0.15
- *   portopt target-return -d assets.json --target 0.10
+ *   po min-variance -d assets.json
+ *   po max-sharpe   -d assets.json
+ *   po target-vol   -d assets.json --target 0.15
+ *   po target-return -d assets.json --target 0.10
  *
  * Returns-series input:
- *   portopt mvo -d daily_returns.csv --returns --shrinkage ledoit-wolf
+ *   po mvo -d daily_returns.csv --returns --shrinkage ledoit-wolf
  *
  * Generate Jupyter diagnostic report:
- *   portopt report -d assets.json -p params.toml -o reports/
+ *   po report -d assets.json -p params.toml -o reports/
  *
- * Run `portopt --help` for full option reference.
+ * Run `po --help` for full option reference.
  */
 
 #include <portopt/portopt.hpp>
@@ -436,8 +436,9 @@ static int runReport(const std::string& data_path,
 // ── main ──────────────────────────────────────────────────────────────────────
 
 int main(int argc, char* argv[]) {
-    CLI::App app{"portopt — Portfolio Optimisation Tool v" +
+    CLI::App app{"po — Portfolio Optimisation Tool v" +
                  std::string(portopt::VERSION_STRING)};
+    app.name("po");
     app.require_subcommand(1);
 
     // Global options

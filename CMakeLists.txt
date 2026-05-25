@@ -14,6 +14,10 @@ option(PORTOPT_BUILD_PYTHON   "Build Python bindings"    ON)
 option(PORTOPT_BUILD_CLI      "Build CLI tool"           ON)
 option(PORTOPT_BUILD_TESTS    "Build test suite"         ON)
 option(PORTOPT_BUILD_EXAMPLES "Build example programs"   ON)
+# Off by default: dependencies fetched via FetchContent aren't in any export
+# set, so the namespaced install of portopt_lib fails at configure time.
+# Enable only when consuming portopt via find_package downstream.
+option(PORTOPT_INSTALL        "Generate install/export targets" OFF)
 
 # Position-independent code for shared library / pybind11
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -93,16 +97,18 @@ if(PORTOPT_BUILD_TESTS)
 endif()
 
 # ── Install ───────────────────────────────────────────────────────────────────
-include(GNUInstallDirs)
-install(TARGETS portopt_lib
-    EXPORT  portoptTargets
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
-install(DIRECTORY include/portopt DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(EXPORT portoptTargets
-    FILE      portoptTargets.cmake
-    NAMESPACE portopt::
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/portopt
-)
+if(PORTOPT_INSTALL)
+    include(GNUInstallDirs)
+    install(TARGETS portopt_lib
+        EXPORT  portoptTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+    install(DIRECTORY include/portopt DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(EXPORT portoptTargets
+        FILE      portoptTargets.cmake
+        NAMESPACE portopt::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/portopt
+    )
+endif()

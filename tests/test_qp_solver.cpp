@@ -127,6 +127,30 @@ TEST_CASE("QP solver — solution satisfies KKT conditions", "[qp][solver]") {
     CHECK(res.x.sum() == Approx(1.0).epsilon(1e-7));
     CHECK((res.x.array() >= -1e-8).all());
     CHECK((res.x.array() <= 1.0 + 1e-8).all());
+
+    // KKT residual reported by the solver should be small at convergence.
+    CHECK(res.kkt_residual < 1e-4);
+}
+
+TEST_CASE("QP solver — KKT residual reports infeasibility direction",
+          "[qp][solver][kkt]") {
+    // Construct a tight problem where the optimum sits on an upper bound.
+    // The KKT residual must remain bounded and finite.
+    const int n = 3;
+    Matrix Q = Matrix::Identity(n, n) * 2.0;
+    Vector f(n);  f << -10.0, 0.0, 0.0;
+    Vector lb = Vector::Zero(n);
+    Vector ub(n);  ub << 0.4, 1.0, 1.0;
+
+    SolverConfig cfg;
+    cfg.tolerance = 1e-10;
+    auto res = solve(Q, f, lb, ub, cfg);
+
+    REQUIRE(res.converged);
+    // Asset 0 should be at its 0.4 cap.
+    CHECK(res.x[0] == Approx(0.4).margin(1e-6));
+    CHECK(std::isfinite(res.kkt_residual));
+    CHECK(res.kkt_residual < 1e-4);
 }
 
 TEST_CASE("QP solver — power iteration eigenvalue", "[qp][eigen]") {

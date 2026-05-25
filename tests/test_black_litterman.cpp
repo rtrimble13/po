@@ -297,3 +297,49 @@ TEST_CASE("BL — BL result is different from plain MVO (views matter)", "[bl][m
     }
     CHECK(any_different);
 }
+
+// ── A7: BL pick-matrix conditioning diagnostics ───────────────────────────────
+
+TEST_CASE("BL exposes pick-matrix rank and posterior conditioning",
+          "[bl][diagnostics]") {
+    auto data = makeThreeAssetData();
+    auto params = oneViewParams();
+    BlackLittermanOptimizer bl(params);
+    auto m = bl.modelOutput(data);
+
+    CHECK(m.pick_matrix_rank == 1);                    // one view → rank 1
+    CHECK(m.pick_matrix_min_singular > 0.0);
+    CHECK(std::isfinite(m.posterior_condition_number));
+    CHECK(m.posterior_condition_number > 0.0);
+}
+
+TEST_CASE("BL detects rank-deficient (collinear) views",
+          "[bl][diagnostics][collinear]") {
+    auto data = makeThreeAssetData();
+    BlackLittermanParameters p = noViewParams();
+
+    // Two views with the SAME pick vector — second is redundant.
+    View v1, v2;
+    v1.description = "Equity outperforms"; v2.description = "Equity outperforms (dup)";
+    v1.pick_vector = Vector(3);  v1.pick_vector << 1.0, 0.0, 0.0;
+    v2.pick_vector = Vector(3);  v2.pick_vector << 1.0, 0.0, 0.0;
+    v1.expected_return = 0.08;   v2.expected_return = 0.08;
+    v1.confidence      = 0.01;   v2.confidence      = 0.01;
+    p.views = {v1, v2};
+
+    BlackLittermanOptimizer bl(p);
+    auto m = bl.modelOutput(data);
+    CHECK(m.pick_matrix_rank == 1);   // two views, but rank 1
+    // Smallest singular value should be near zero.
+    CHECK(m.pick_matrix_min_singular < 1e-9);
+}
+
+TEST_CASE("BL rejects market_weights that don't sum to 1 (1e-6 tol)",
+          "[bl][validation]") {
+    auto data = makeThreeAssetData();
+    // Perturb by 1e-3 → must throw under the tightened tolerance.
+    Vector mw(3); mw << 0.601, 0.300, 0.100;  // sums to 1.001
+    data.market_weights = mw;
+    BlackLittermanOptimizer bl(noViewParams());
+    CHECK_THROWS(bl.modelOutput(data));
+}

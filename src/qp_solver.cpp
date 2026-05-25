@@ -225,17 +225,77 @@ static SolverResult solveImpl(const Matrix&                        Q,
         }
     }
 
-    if (!result.converged)
-        log::warn("QP solver did not converge in {} iterations (residual={:.2e})",
-                  cfg.max_iterations, result.primal_residual);
-
     result.x         = w;
     result.gradient  = gradient(w);
     result.objective = 0.5 * w.dot(Q * w) + f.dot(w)
                      + groupPenaltyValue(w, groups, group_penalty);
 
-    log::debug("QP done: obj={:.6f} converged={} iters={}",
-               result.objective, result.converged, result.iterations);
+    // ── KKT residual ─────────────────────────────────────────────────────────
+    // For   min 0.5 x'Qx + f'x   s.t.  1'x = b,  lb ≤ x ≤ ub
+    // the stationarity condition is  g = Qx + f = ν·1 + μ_l − μ_u
+    // with μ_l, μ_u ≥ 0 and complementary slackness. From any strictly
+    // interior coordinate we read off ν directly; from bound-active
+    // coordinates we get bounds on it. We estimate ν̂ from the interior
+    // coordinates (median for robustness; falls back to a midpoint when
+    // all coordinates are bound-active) and then compute the per-index
+    // residual as described in SolverResult::kkt_residual.
+    {
+        const Vector& g = result.gradient;
+        // Use a relative tolerance for "interior".
+        const double bound_tol = 1e-8 *
+            std::max(1.0, (ub - lb).cwiseAbs().maxCoeff());
+        std::vector<double> interior_g;
+        interior_g.reserve(static_cast<std::size_t>(n));
+        for (int i = 0; i < n; ++i) {
+            if (w[i] > lb[i] + bound_tol && w[i] < ub[i] - bound_tol)
+                interior_g.push_back(g[i]);
+        }
+        double nu_hat = 0.0;
+        if (!interior_g.empty()) {
+            std::sort(interior_g.begin(), interior_g.end());
+            nu_hat = interior_g[interior_g.size() / 2];
+        } else {
+            // No interior coordinates — pick ν̂ that minimises the L∞
+            // residual: the midpoint of (max g_i where ub-active,
+            // min g_i where lb-active).
+            double hi_bound = -std::numeric_limits<double>::infinity();
+            double lo_bound =  std::numeric_limits<double>::infinity();
+            for (int i = 0; i < n; ++i) {
+                if (w[i] >= ub[i] - bound_tol) hi_bound = std::max(hi_bound, g[i]);
+                if (w[i] <= lb[i] + bound_tol) lo_bound = std::min(lo_bound, g[i]);
+            }
+            if (std::isfinite(hi_bound) && std::isfinite(lo_bound))
+                nu_hat = 0.5 * (hi_bound + lo_bound);
+            else if (std::isfinite(hi_bound))
+                nu_hat = hi_bound;
+            else if (std::isfinite(lo_bound))
+                nu_hat = lo_bound;
+        }
+
+        double r_inf = 0.0;
+        for (int i = 0; i < n; ++i) {
+            double r_i;
+            if (w[i] > lb[i] + bound_tol && w[i] < ub[i] - bound_tol)
+                r_i = std::abs(g[i] - nu_hat);
+            else if (w[i] >= ub[i] - bound_tol)
+                r_i = std::max(0.0, g[i] - nu_hat);
+            else  // w[i] ≈ lb[i]
+                r_i = std::max(0.0, nu_hat - g[i]);
+            r_inf = std::max(r_inf, r_i);
+        }
+        result.kkt_residual  = r_inf;
+        result.dual_estimate = nu_hat;
+    }
+
+    if (!result.converged)
+        log::warn("QP solver did not converge in {} iterations "
+                  "(primal_res={:.2e}, kkt_res={:.2e})",
+                  cfg.max_iterations, result.primal_residual,
+                  result.kkt_residual);
+
+    log::debug("QP done: obj={:.6f} converged={} iters={} kkt={:.2e}",
+               result.objective, result.converged, result.iterations,
+               result.kkt_residual);
 
     return result;
 }

@@ -190,6 +190,9 @@ OptimizationResult MVOptimizer::optimizeFor(const MarketData& data,
     result.method     = "MVO";
     result.solve_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     result.gradient_at_optimum = qp.gradient;
+    result.primal_residual = qp.primal_residual;
+    result.kkt_residual    = qp.kkt_residual;
+    result.dual_estimate   = qp.dual_estimate;
 
     const double rf = effectiveRiskFreeRate(params_, data);
     result.metrics = computeMetrics(qp.x, data.expected_returns,

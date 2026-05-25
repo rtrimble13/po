@@ -165,6 +165,9 @@ PYBIND11_MODULE(_portopt, m) {
         .def_readonly("gradient_at_optimum",  &OptimizationResult::gradient_at_optimum)
         .def_readonly("active_lower_bounds",  &OptimizationResult::active_lower_bounds)
         .def_readonly("active_upper_bounds",  &OptimizationResult::active_upper_bounds)
+        .def_readonly("primal_residual",      &OptimizationResult::primal_residual)
+        .def_readonly("kkt_residual",         &OptimizationResult::kkt_residual)
+        .def_readonly("dual_estimate",        &OptimizationResult::dual_estimate)
         .def("to_dict", [](const OptimizationResult& r) {
             py::dict d;
             d["method"]     = r.method;
@@ -186,6 +189,11 @@ PYBIND11_MODULE(_portopt, m) {
             mtr["beta_to_benchmark"]     = r.metrics.beta_to_benchmark;
             mtr["turnover"]              = r.metrics.turnover;
             d["metrics"] = mtr;
+            py::dict conv;
+            conv["primal_residual"] = r.primal_residual;
+            conv["kkt_residual"]    = r.kkt_residual;
+            conv["dual_estimate"]   = r.dual_estimate;
+            d["convergence"] = conv;
             return d;
         });
 

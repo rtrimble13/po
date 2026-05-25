@@ -40,6 +40,17 @@ struct SolverResult {
     bool   converged{false};
     double primal_residual{0.0};   ///< ||x_{k+1} - x_k||
     Vector gradient;               ///< ∇f(x*) = Qx* + f
+
+    /// L∞ KKT residual of the box+budget QP at x*. Specifically:
+    ///   r_i = g_i − ν̂  for indices where x_i is strictly interior,
+    ///   r_i = max(0, ν̂ − g_i)  where x_i = lb_i,
+    ///   r_i = max(0, g_i − ν̂)  where x_i = ub_i,
+    /// and `kkt_residual = max_i |r_i|`. Smaller is more optimal.
+    double kkt_residual{0.0};
+
+    /// Estimate of the Lagrange multiplier ν̂ on the budget constraint
+    /// (recovered from g_i for indices strictly interior to [lb_i, ub_i]).
+    double dual_estimate{0.0};
 };
 
 /**

@@ -213,6 +213,11 @@ struct OptimizationResult {
     Vector             gradient_at_optimum;   ///< Σw − λμ at the solution
     std::vector<int>   active_lower_bounds;   ///< Indices where w_i = lb_i
     std::vector<int>   active_upper_bounds;   ///< Indices where w_i = ub_i
+
+    // Solver convergence diagnostics
+    double             primal_residual{0.0};  ///< ‖w_{k+1} − w_k‖ at exit
+    double             kkt_residual{0.0};     ///< L∞ KKT optimality residual (see qp_solver.hpp)
+    double             dual_estimate{0.0};    ///< Estimated multiplier ν̂ on the budget constraint
 };
 
 /// A single point on the efficient frontier.

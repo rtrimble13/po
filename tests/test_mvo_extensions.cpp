@@ -287,3 +287,47 @@ TEST_CASE("Effective N equals n for equal-weighted portfolio",
 // ── BL constraint inheritance ────────────────────────────────────────────────
 // (Tested indirectly: BL uses MVOptimizer::resolveMVOParameters under the hood
 //  — the inheritance behaviour is in test_black_litterman.cpp.)
+
+// ── A1: Risk-free-rate override semantics ────────────────────────────────────
+
+TEST_CASE("MVOParameters.risk_free_rate overrides MarketData.risk_free_rate",
+          "[mvo][risk_free_rate]") {
+    auto data = fiveAssets();
+    data.risk_free_rate = 0.02;
+
+    MVOParameters p_no_override;
+    p_no_override.constraints   = PortfolioConstraints::longOnly(5);
+    p_no_override.risk_aversion = 2.0;
+    auto r_data_rf = MVOptimizer(p_no_override).optimize(data);
+
+    MVOParameters p_override = p_no_override;
+    p_override.risk_free_rate = 0.05;
+    auto r_param_rf = MVOptimizer(p_override).optimize(data);
+
+    // The two Sharpe ratios should differ because rf differs.
+    const double sh_d = r_data_rf.metrics.sharpe_ratio;
+    const double sh_p = r_param_rf.metrics.sharpe_ratio;
+    CHECK(std::abs(sh_d - sh_p) > 1e-6);
+
+    // And the param override should give EXACTLY the value computed with
+    // rf = 0.05 — i.e., not 0.02 + 0.05 = 0.07 (the old additive bug).
+    const double expected =
+        (r_param_rf.metrics.expected_return - 0.05) /
+        r_param_rf.metrics.volatility;
+    CHECK(sh_p == Approx(expected).margin(1e-9));
+}
+
+// ── A2: KKT residual is exposed on OptimizationResult ─────────────────────────
+
+TEST_CASE("OptimizationResult exposes KKT residual",
+          "[mvo][kkt]") {
+    auto data = fiveAssets();
+    MVOParameters p;
+    p.constraints   = PortfolioConstraints::longOnly(5);
+    p.risk_aversion = 2.0;
+    auto r = MVOptimizer(p).optimize(data);
+    REQUIRE(r.converged);
+    CHECK(std::isfinite(r.kkt_residual));
+    CHECK(std::isfinite(r.dual_estimate));
+    CHECK(r.kkt_residual < 1e-3);
+}

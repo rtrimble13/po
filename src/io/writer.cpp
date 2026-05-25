@@ -107,6 +107,11 @@ std::string resultToJSON(const OptimizationResult& r, int indent) {
             {"upper", r.active_upper_bounds}
         };
     }
+    json conv;
+    conv["primal_residual"] = r.primal_residual;
+    conv["kkt_residual"]    = r.kkt_residual;
+    conv["dual_estimate"]   = r.dual_estimate;
+    j["convergence"] = conv;
     return j.dump(indent);
 }
 

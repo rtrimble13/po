@@ -52,22 +52,71 @@ cmake -B build -DPORTOPT_BUILD_TESTS=OFF    # no test suite
 
 ### Python bindings
 
-After building, register the module:
+The recommended workflow creates a project-local virtualenv (`.venv/`) and
+installs the `portopt` package in editable mode with every optional extra.
+Two equivalent entry points:
+
+```bash
+# One-shot bootstrap: configures CMake, builds, creates venv, pip-installs
+./scripts/bootstrap.sh
+
+# Or, after `cmake -B build -DCMAKE_BUILD_TYPE=Release`:
+cmake --build build --target python-venv --parallel
+```
+
+Then activate and use:
+
 ```bash
 # Linux/macOS
-export PYTHONPATH="$PWD/build/python:$PYTHONPATH"
+source .venv/bin/activate
 
 # Windows (PowerShell)
-$env:PYTHONPATH = "$PWD\build\python;$env:PYTHONPATH"
+.venv\Scripts\Activate.ps1
 
 python -c "import portopt; print(portopt.__version__)"
 ```
 
-Optional Python extras:
+The `python-venv` target stages the compiled `_portopt` extension into
+`python/portopt/` as a post-build step, so `import portopt` resolves
+without any `PYTHONPATH` setup.
+
+#### Choosing extras
+
+The venv installs `portopt[all]` by default. To install a narrower subset:
+
 ```bash
-pip install matplotlib pandas numpy   # for helper functions + notebook
-pip install jupyter nbconvert          # for report generation
+cmake -B build -DPORTOPT_VENV_EXTRAS=plot,notebook
+cmake --build build --target python-venv
 ```
+
+| Extra | Adds | Required for |
+|---|---|---|
+| `plot` | matplotlib, pandas | Plotting helpers and DataFrame conversion |
+| `notebook` | jupyter, nbconvert, ipykernel, matplotlib, pandas | `po report` and the diagnostic notebook |
+| `mcp` | pydantic≥2 | `portopt.mcp_server` reference dispatcher |
+| `dev` | pytest | Python test suite |
+| `all` | union of the above | Everything (default) |
+
+#### Pointing at a different Python interpreter
+
+```bash
+cmake -B build -DPORTOPT_PYTHON=/path/to/python3.12
+cmake --build build --target python-venv
+```
+
+#### Installing into an existing environment (no `python-venv`)
+
+If you'd rather use conda, pipx, an external venv, or a system Python:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target _portopt --parallel
+pip install -e ./python[all]
+```
+
+The first command builds and stages `_portopt.so` into the `python/portopt/`
+package directory; the second installs the package (with deps) into whatever
+environment `pip` is in.
 
 ---
 

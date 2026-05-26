@@ -17,6 +17,9 @@ __pycache__/
 .pytest_cache/
 # Locally-copied pybind11 module — installed under build/python/
 python/portopt/_portopt*.so
+python/portopt/_portopt*.pyd
+# Project virtual environment created by `cmake --build build --target python-venv`
+.venv/
 
 # IDE
 .vscode/
@@ -26,3 +29,10 @@ python/portopt/_portopt*.so
 
 # Testing
 tests/Testing
+
+# Images
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif

@@ -13,9 +13,28 @@ end-to-end and emits:
 
 ## External dependency
 
-`jupyter` and `nbconvert` must be on PATH. The script prints an installation
-hint and exits cleanly if they're missing — `run_all.sh` will skip this
-example rather than fail the whole suite.
+`po report` runs `python -m nbconvert` to execute the notebook. The preferred
+setup is the project venv created by the `python-venv` CMake target — it
+already has `nbconvert`, `matplotlib`, `pandas`, and `ipykernel` plus
+`portopt` itself:
+
+```bash
+cmake --build build --target python-venv
+source .venv/bin/activate           # then re-run this script
+```
+
+`po report` resolves Python in this order:
+
+1. `$PORTOPT_PYTHON` (explicit override)
+2. `$VIRTUAL_ENV/bin/python` (active venv)
+3. `python` on PATH
+
+The example script auto-routes through `.venv/` if it exists but isn't
+activated. If neither the venv nor a system `nbconvert` is found, the script
+prints an installation hint and exits cleanly — `run_all.sh` skips this
+example rather than failing the whole suite.
+
+Manual install into an existing environment:
 
 ```bash
 pip install jupyter nbconvert matplotlib pandas

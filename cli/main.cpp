@@ -37,6 +37,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -325,6 +326,46 @@ static int runPMTarget(PMTarget which,
     return result.converged ? 0 : 1;
 }
 
+// ── Helper: shell-quote a string for std::system() ───────────────────────────
+static std::string shellQuote(const std::string& s) {
+    std::string out;
+    out.reserve(s.size() + 2);
+    out.push_back('"');
+    for (char c : s) {
+        if (c == '"' || c == '\\' || c == '$' || c == '`') out.push_back('\\');
+        out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+}
+
+// ── Helper: pick the Python interpreter to drive `jupyter nbconvert` ─────────
+// Resolution order:
+//   1. $PORTOPT_PYTHON              (explicit override)
+//   2. $VIRTUAL_ENV/bin/python      (active venv, if any)
+//   3. "python" on PATH             (fallback)
+// Returns the python command followed by `-m nbconvert` so we don't rely on
+// `jupyter-nbconvert` being on PATH as a separate script.
+static std::string resolveNbconvert() {
+    auto getenv_str = [](const char* k) -> std::string {
+        const char* v = std::getenv(k);
+        return v ? std::string(v) : std::string();
+    };
+    std::string py = getenv_str("PORTOPT_PYTHON");
+    if (py.empty()) {
+        std::string venv = getenv_str("VIRTUAL_ENV");
+        if (!venv.empty()) {
+#ifdef _WIN32
+            py = venv + "\\Scripts\\python.exe";
+#else
+            py = venv + "/bin/python";
+#endif
+        }
+    }
+    if (py.empty()) py = "python";
+    return shellQuote(py) + " -m nbconvert";
+}
+
 // ── Sub-command: report ───────────────────────────────────────────────────────
 
 static int runReport(const std::string& data_path,
@@ -410,23 +451,26 @@ static int runReport(const std::string& data_path,
                            : notebook_path;
     const std::string outfile = (out_dir / "diagnostic_report.ipynb").string();
 
+    const std::string nbconvert = resolveNbconvert();
     std::string cmd =
-        "jupyter nbconvert --to notebook --execute "
+        nbconvert + " --to notebook --execute "
         "--ExecutePreprocessor.timeout=600 "
-        "--output \"" + outfile + "\" "
+        "--output " + shellQuote(outfile) + " "
         "--ExecutePreprocessor.kernel_name=python3 "
-        "\"" + nb + "\"";
+        + shellQuote(nb);
 
     std::cout << "Running: " << cmd << "\n";
     int rc = std::system(cmd.c_str());
     if (rc != 0) {
         std::cerr << "nbconvert failed (exit " << rc << ").\n"
-                  << "Ensure Jupyter is installed: pip install jupyter nbconvert\n";
+                  << "Set PORTOPT_PYTHON to a Python that has nbconvert installed,\n"
+                  << "activate the project venv (cmake --build build --target python-venv),\n"
+                  << "or `pip install jupyter nbconvert` into the current environment.\n";
         return rc;
     }
 
     std::string html_cmd =
-        "jupyter nbconvert --to html \"" + outfile + "\"";
+        nbconvert + " --to html " + shellQuote(outfile);
     (void)std::system(html_cmd.c_str());
 
     std::cout << "Report generated: " << outfile << "\n";

@@ -23,8 +23,8 @@ than a risk-aversion parameter.
 ## Expected output (abridged)
 
 ```
-  Expected Return  : 15.0023 %
-  Volatility       : 14.9925 %   ← ~ matches the 15% target
+  Expected Return  : 12.9186 %
+  Volatility       : 15.0000 %   ← matches the 15% target
   Sharpe Ratio     :  0.5946
 ```
 

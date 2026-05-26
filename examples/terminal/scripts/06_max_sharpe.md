@@ -22,8 +22,8 @@ visible on the command line (the params file also sets it).
 ## Expected output (abridged)
 
 ```
-  Expected Return  : 16.7227 %
-  Volatility       : 14.6395 %
+  Expected Return  : 12.7078 %
+  Volatility       : 14.6383 %
   Sharpe Ratio     :  0.5949   ← highest realised Sharpe among examples 01–08
 ```
 

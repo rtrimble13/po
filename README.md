@@ -33,7 +33,17 @@ A high-performance C++ library for portfolio optimisation, with Python bindings,
 
 ## Quick start
 
-### Build
+The fastest path — builds C++ and creates a Python venv with every optional
+extra (plotting, notebook/`po report`, MCP server) installed:
+
+```bash
+./scripts/bootstrap.sh
+source .venv/bin/activate
+python -c "import portopt; print(portopt.__version__)"
+po --help
+```
+
+### Build only (no Python venv)
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -54,13 +64,51 @@ Optional flags:
 ctest --test-dir build --output-on-failure
 ```
 
-### Install Python package
+### Python venv
+
+The `python-venv` CMake target creates `.venv/` at the repo root, stages the
+compiled `_portopt` extension into the Python package, and `pip install`s
+`portopt[all]` in editable mode:
 
 ```bash
-# After building, add the build directory to PYTHONPATH:
-export PYTHONPATH="$PWD/build/python:$PYTHONPATH"
+cmake --build build --target python-venv
+source .venv/bin/activate         # or .venv\Scripts\activate on Windows
 python -c "import portopt; print(portopt.__version__)"
 ```
+
+The target is idempotent — rerun it after pulling new code or editing
+`python/pyproject.toml` to refresh deps. Override the defaults via CMake
+cache variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORTOPT_VENV_DIR` | `${PROJECT_SOURCE_DIR}/.venv` | Where to create the venv |
+| `PORTOPT_VENV_EXTRAS` | `all` | Comma-separated extras from `python/pyproject.toml` (e.g. `plot,notebook`) |
+| `PORTOPT_PYTHON` | (autodetected) | Python interpreter used to bootstrap the venv |
+
+#### Installing into an existing environment
+
+If you already have a venv (or use conda, pipx, etc.) and just want `portopt`
+installed there, build the extension first and pip-install the package
+directly:
+
+```bash
+cmake --build build --target _portopt --parallel    # builds + stages the .so
+pip install -e ./python[all]
+```
+
+#### Python dependencies — extras
+
+Pick what you need from `python/pyproject.toml`:
+
+| Extra | Adds | Use when |
+|---|---|---|
+| (none) | `numpy` | Core library only |
+| `plot` | `matplotlib`, `pandas` | Plotting helpers, DataFrame conversion |
+| `notebook` | `jupyter`, `nbconvert`, `ipykernel`, `matplotlib`, `pandas` | `po report` + diagnostic notebook |
+| `mcp` | `pydantic>=2` | `portopt.mcp_server` reference dispatcher |
+| `dev` | `pytest` | Running the Python test suite |
+| `all` | union of the above | Default for `python-venv` |
 
 ## CLI usage
 
